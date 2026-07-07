@@ -486,7 +486,11 @@ function applyResult(state, line, res) {
   if (wrongEntry) s.wrongBook = [...(s.wrongBook || []), wrongEntry].slice(-100);
   // 流利度日志：限时题全量记录（对错都记），自动化的证据在这条曲线里
   if (res.timeLimit > 0 && res.timeUsed != null) {
-    s.speedLog = [...(s.speedLog || []), { t: Date.now(), line, ok: !!correct, frac: Math.round((res.timeUsed / res.timeLimit) * 100) / 100 }].slice(-300);
+    s.speedLog = [...(s.speedLog || []), {
+      t: Date.now(), line, ok: !!correct,
+      frac: Math.round((res.timeUsed / res.timeLimit) * 100) / 100,
+      sec: res.timeUsed, wc: res.wc || null, lv: res.lv || null,
+    }].slice(-300);
   }
   const st = { ...s.streaks[line] };
   if (correct) { st.c += 1; st.w = 0; } else { st.w += 1; st.c = 0; }
@@ -728,6 +732,13 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
       materialId: q.materialId,
       timeUsed: q.timeLimit > 0 ? q.timeLimit - left : null, // 答对的也记时——流利度=正确率不降、用时下降
       timeLimit: q.timeLimit > 0 ? q.timeLimit : null,
+      // 词数：解码记"读了多少词"，产出题记"写了多少词"——流利度用 wpm 度量，消除句长噪声
+      wc: (() => {
+        const t = q.line === "decode" ? (q.sentence || q.passage || "") : (isBatch ? "" : (inputRef.current || ""));
+        const n = t.trim() ? t.trim().split(/\s+/).length : 0;
+        return n || null;
+      })(),
+      lv: q.level, // 等级入日志——流利度只在同等级内比较，升级导致的变慢不算退步
     });
   }
 
@@ -1521,22 +1532,22 @@ function Profile({ state, onExit, onRetest, onDeleteCard }) {
         ))}
       </div>
       <div style={{ background: C.surface, borderRadius: 14, padding: 18, marginBottom: 14 }}>
-        <p style={{ ...mono, fontSize: 11, color: C.sub, margin: "0 0 10px" }}>FLUENCY 流利度 — 自动化的证据：正确率不降、用时占比下降</p>
+        <p style={{ ...mono, fontSize: 11, color: C.sub, margin: "0 0 10px" }}>FLUENCY 流利度 — 同等级内的 wpm 变化（词数/用时，消除句长噪声；参考：母语者阅读约 200-250 wpm）</p>
         {LINE_KEYS.map((l) => {
-          const logs = (state.speedLog || []).filter((e) => e.line === l && e.ok);
-          if (logs.length < 6) return <p key={l} style={{ fontSize: 12, color: C.sub, margin: "0 0 6px" }}>{LINES[l].name}：样本不足（答对的限时题 ≥6 道后显示）</p>;
-          const recent = logs.slice(-15), prev = logs.slice(-30, -15);
-          const avg = (a) => Math.round((a.reduce((s, e) => s + e.frac, 0) / a.length) * 100);
-          const r = avg(recent), p = prev.length >= 6 ? avg(prev) : null;
+          const lvNow = state.levels[l];
+          const logs = (state.speedLog || []).filter((e) => e.line === l && e.ok && e.wc && e.sec >= 1 && e.lv === lvNow);
+          if (logs.length < 6) return <p key={l} style={{ fontSize: 12, color: C.sub, margin: "0 0 6px" }}>{LINES[l].name} L{lvNow}：样本不足（当前等级答对 ≥6 道限时题后显示）</p>;
+          const wpm = (a) => Math.round(a.reduce((s, e) => s + (e.wc / e.sec) * 60, 0) / a.length);
+          const recent = logs.slice(-12), prev = logs.slice(-24, -12);
+          const r = wpm(recent), p = prev.length >= 6 ? wpm(prev) : null;
           const delta = p != null ? r - p : null;
           return (
             <div key={l} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 7 }}>
-              <span style={{ fontSize: 12, minWidth: 70, color: C.ink }}>{LINES[l].name}</span>
-              <div style={{ flex: 1, height: 8, background: C.bg, borderRadius: 4 }}>
-                <div style={{ width: `${Math.min(100, r)}%`, height: "100%", background: LINES[l].color, borderRadius: 4, opacity: 0.7 }} />
-              </div>
-              <span style={{ ...mono, fontSize: 11, minWidth: 110, textAlign: "right", color: delta == null ? C.sub : delta < 0 ? C.good : delta > 0 ? C.amber : C.sub }}>
-                答对均用 {r}% 时限{delta != null ? (delta < 0 ? ` ↓${-delta}` : delta > 0 ? ` ↑${delta}` : " →") : ""}
+              <span style={{ fontSize: 12, minWidth: 96, color: C.ink }}>{LINES[l].name} L{lvNow}</span>
+              <span style={{ fontSize: 12, color: C.sub }}>{l === "decode" ? "阅读" : "产出"}</span>
+              <span style={{ ...mono, fontSize: 13, fontWeight: 700, color: C.ink, marginLeft: "auto" }}>{r} wpm</span>
+              <span style={{ ...mono, fontSize: 11, minWidth: 44, textAlign: "right", color: delta == null ? C.sub : delta > 0 ? C.good : delta < 0 ? C.amber : C.sub }}>
+                {delta != null ? (delta > 0 ? `↑${delta}` : delta < 0 ? `↓${-delta}` : "→") : ""}
               </span>
             </div>
           );
