@@ -238,7 +238,7 @@ const TIME_SCALE = 1;
 function timeLimitFor(line, level, kind) {
   let t;
   if (line === "decode") t = kind === "gist" ? 35 : level >= 3 ? 18 : 12;
-  else if (line === "register") t = kind === "judge" ? 15 : 90;
+  else if (line === "register") t = kind === "judge" ? 15 : kind === "judge3" ? 30 : 90;
   else if (line === "build") t = [0, 0, 45, 30, 90, 60][level] || 45; // 用户体感校准：L2 45s / L3 30s / L4 90s / L5 60s；PRD原版偏紧，待内化后再收
   else t = 60;
   return t > 0 ? Math.round(t * TIME_SCALE) : t;
@@ -312,8 +312,9 @@ SELF-CHECK before returning: (1) does the answerIndex option commit any misreadi
     // 核心理念：语域 = 语气与意图匹配。犹豫/软化不是错误，错位才是错误
     const intentRules = ` EVERY rewrite question MUST state the learner's communicative INTENT in the "intent" field (Chinese, e.g. "你已拍板，通知团队" / "你有初步想法，想听大家意见" / "你不同意上级的方案，需要委婉表达" / "请求同事帮忙" / "传达坏消息" / "催进度"). ROTATE across these intents — do not always pick decisive ones. THE GOLDEN RULE: hedging is a TOOL, not an error. If the intent is tentative (seeking input, soft disagreement), the polished version MUST KEEP well-formed softeners (What if we... / One option could be... / I'm leaning toward X, curious what you think) — stripping them would be WRONG. The only tone error is MISMATCH between tone and intent: sounding tentative when announcing a decision, or sounding decided when consulting. The draft's flaw should often be exactly such a mismatch.`;
     if (level === 1) {
-      spec = `Question type "judge": one business-context sentence whose register is clearly casual, neutral, or formal. The sentence must be something a real person could genuinely write at work.`;
-      schema = `{"kind":"judge","sentence":"...","answerIndex":0,"options":["Casual","Neutral","Formal"],"why":"which words signal the register"}`;
+      // 一题三判：单次语气判断信息密度太低，打包三句算一题（全对才算对）
+      spec = `Question type "judge3": THREE short business-context sentences, each with a clearly identifiable register (casual / neutral / formal — the three sentences should cover different registers, in random order). Each sentence must be something a real person could genuinely write at work — no cartoonish slang.`;
+      schema = `{"kind":"judge3","options":["Casual","Neutral","Formal"],"items":[{"sentence":"...","answerIndex":0,"why":"which words signal it (one short sentence)"},{"sentence":"...","answerIndex":1,"why":"..."},{"sentence":"...","answerIndex":2,"why":"..."}]}`;
     } else if (level === 3) {
       spec = `Question type "rewrite": a realistic FIRST DRAFT containing 1-2 typical Chinese-speaker errors (Chinglish phrasing, wrong collocation, article/tense slip) — the kind of sentence the learner might actually type. Learner polishes it into what they would actually send.${draftVoice}${intentRules}${mediumRules}`;
       schema = `{"kind":"rewrite","sentence":"...","intent":"<中文：你的沟通意图>","scenario":"...","note":"the errors planted + the intent + the medium's conventions (for grading)"}`;
@@ -608,6 +609,7 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
   const [phase, setPhase] = useState("answer"); // answer | grading | coach | reveal | mcqdone
   const [input, setInput] = useState("");
   const [picked, setPicked] = useState(null);
+  const [picks, setPicks] = useState([null, null, null]); // judge3 三判
   const [grade, setGrade] = useState(null);
   const [left, setLeft] = useState(q.timeLimit);
   const [attempt, setAttempt] = useState(1);
@@ -624,11 +626,18 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
   }, [left, phase]); // eslint-disable-line
 
   const isMCQ = q.kind === "trunk" || q.kind === "judge";
+  const isBatch = q.kind === "judge3";
 
   async function handleSubmit(auto = false) {
     if (submittedRef.current) return;
     submittedRef.current = true;
     if (auto) timedOutRef.current = true;
+    if (isBatch) {
+      const per = (q.items || []).map((it, i) => picks[i] === it.answerIndex);
+      setGrade({ correct: per.every(Boolean), per }); // 全对才算对——连对2题=连续判对6句，L1毕业证据更扎实
+      setPhase("mcqdone");
+      return;
+    }
     if (isMCQ) {
       const correct = picked === q.answerIndex && picked !== null;
       setGrade({ correct });
@@ -658,8 +667,9 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
 
   function finish() {
     let correct, tags = [];
-    if (isMCQ) correct = grade.correct;
+    if (isMCQ || isBatch) { correct = grade.correct; if (isBatch && !correct) tags = ["register"]; }
     else { correct = !!grade.pass && attempt === 1; tags = (grade.issues || []).map((i) => i.tag); }
+    const label = (i) => (i == null ? "(未选)" : q.options[i]);
     let wrongEntry = null;
     if (!correct) {
       wrongEntry = {
@@ -667,13 +677,19 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
         srs: srsInit(), // 明天到期重考
         date: new Date().toISOString().slice(0, 10),
         line: q.line, level: q.level, kind: q.kind, structKey: q.structKey || null,
-        question: q.sentence || q.passage || q.chinese || "",
+        question: isBatch ? (q.items || []).map((it) => it.sentence).join(" ／ ") : (q.sentence || q.passage || q.chinese || ""),
         scenario: q.scenario || null,
-        userAnswer: isMCQ
+        userAnswer: isBatch
+          ? (q.items || []).map((it, i) => label(picks[i])).join(" / ")
+          : isMCQ
           ? (picked === null ? "(超时未答)" : q.options[picked])
           : (inputRef.current || "(超时未答)"),
-        reference: isMCQ ? q.options[q.answerIndex] : (grade.reference || ""),
-        issues: isMCQ
+        reference: isBatch
+          ? (q.items || []).map((it) => q.options[it.answerIndex]).join(" / ")
+          : isMCQ ? q.options[q.answerIndex] : (grade.reference || ""),
+        issues: isBatch
+          ? (q.items || []).filter((it, i) => picks[i] !== it.answerIndex).map((it) => ({ tag: "register", hint: it.why || it.sentence }))
+          : isMCQ
           ? (q.why ? [{ tag: "structure-misread", hint: q.why }] : [])
           : (grade.issues || []),
         timedOut: timedOutRef.current, // 超时(没读完/没写完)和误读是两种不同的问题
@@ -690,13 +706,16 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
       structKey: q.structKey, wrongEntry, cards,
       reviewCardId: q.reviewCardId || null, reviewOk: !!(usedReviewWord && grade.phraseOk !== false),
       retestId: q.retestId || null,
-      line: q.line, qText: q.sentence || q.passage || q.chinese || "", materialId: q.materialId,
+      line: q.line,
+      qText: isBatch ? (q.items || []).map((it) => it.sentence).join(" | ") : (q.sentence || q.passage || q.chinese || ""),
+      materialId: q.materialId,
     });
   }
 
   const prompt = q.kind === "trunk" ? "Pick the core meaning (who does what):"
     : q.kind === "gist" ? (q.level === 5 ? "Write a one-line gist in English:" : "Write a one-line gist (中文 or English):")
     : q.kind === "judge" ? "What register is this sentence?"
+    : q.kind === "judge3" ? "Three quick calls — judge each register:"
     : q.kind === "rewrite" ? (q.level >= 4 ? "Write it in English, register-appropriate:" : "Rewrite it properly:")
     : q.kind === "relay" ? "They're waiting — type your reply:"
     : "Say it in English:";
@@ -721,7 +740,7 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
         </div>
       )}
 
-      <div style={{ background: C.bg, borderRadius: 10, padding: 14, marginBottom: 14 }}>
+      <div style={{ background: C.bg, borderRadius: 10, padding: 14, marginBottom: 14, display: isBatch ? "none" : "block" }}>
         <p style={{ margin: 0, fontSize: 16, lineHeight: 1.65, color: C.ink, whiteSpace: "pre-wrap" }}>
           {q.sentence || q.passage || q.chinese}
         </p>
@@ -742,6 +761,25 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
       <p style={{ ...disp, fontWeight: 700, fontSize: 14, margin: "0 0 10px", color: C.ink }}>{prompt}</p>
 
       {/* ANSWER PHASE */}
+      {phase === "answer" && isBatch && (
+        <div style={{ display: "grid", gap: 12 }}>
+          {(q.items || []).map((it, i) => (
+            <div key={i} style={{ background: C.bg, borderRadius: 10, padding: 12 }}>
+              <p style={{ margin: "0 0 8px", fontSize: 14.5, lineHeight: 1.55, color: C.ink }}>{i + 1}. {it.sentence}</p>
+              <div style={{ display: "flex", gap: 8 }}>
+                {q.options.map((opt, j) => (
+                  <button key={j} onClick={() => setPicks(picks.map((p, k) => (k === i ? j : p)))} style={{
+                    flex: 1, padding: "8px 6px", borderRadius: 8, cursor: "pointer", fontSize: 13, ...body,
+                    border: `2px solid ${picks[i] === j ? C.accent : C.line}`,
+                    background: picks[i] === j ? C.accentSoft : "#fff", color: C.ink,
+                  }}>{opt}</button>
+                ))}
+              </div>
+            </div>
+          ))}
+          <div><Btn onClick={() => handleSubmit()} disabled={picks.some((p) => p === null)}>Lock answers</Btn></div>
+        </div>
+      )}
       {phase === "answer" && isMCQ && (
         <div style={{ display: "grid", gap: 8 }}>
           {q.options.map((opt, i) => (
@@ -766,7 +804,29 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
       {phase === "grading" && <p style={{ ...mono, color: C.sub, fontSize: 13 }}>Coach is reading your answer…</p>}
 
       {/* MCQ RESULT */}
-      {phase === "mcqdone" && (
+      {phase === "mcqdone" && isBatch && (
+        <div>
+          <div style={{ display: "grid", gap: 10 }}>
+            {(q.items || []).map((it, i) => {
+              const right = picks[i] === it.answerIndex;
+              return (
+                <div key={i} style={{ borderRadius: 10, padding: 12, background: right ? C.goodSoft : C.badSoft, border: `2px solid ${right ? C.good : C.bad}` }}>
+                  <p style={{ margin: "0 0 4px", fontSize: 14.5, lineHeight: 1.55, color: C.ink }}>{i + 1}. {it.sentence}</p>
+                  <p style={{ ...mono, margin: 0, fontSize: 12, color: right ? C.good : C.bad }}>
+                    {right ? `✓ ${q.options[it.answerIndex]}` : `✗ 你选 ${picks[i] == null ? "（超时未选）" : q.options[picks[i]]} → 应为 ${q.options[it.answerIndex]}`}
+                  </p>
+                  {!right && it.why && <p style={{ margin: "4px 0 0", fontSize: 12.5, lineHeight: 1.5, color: C.ink }}>{it.why}</p>}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8 }}>
+            <Tag tone={grade.correct ? "good" : "bad"}>{grade.correct ? "3/3 CORRECT" : `${(grade.per || []).filter(Boolean).length}/3 · 需全对`}</Tag>
+          </div>
+          <div style={{ marginTop: 12 }}><Btn onClick={finish}>Next →</Btn></div>
+        </div>
+      )}
+      {phase === "mcqdone" && !isBatch && (
         <div>
           <div style={{ display: "grid", gap: 8 }}>
             {q.options.map((opt, i) => (
