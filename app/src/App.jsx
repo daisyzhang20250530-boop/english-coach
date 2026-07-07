@@ -78,6 +78,17 @@ const STRUCT_KEYS = Object.keys(STRUCTURES);
 // 内化标准：见过 ≥4 次且正确率 ≥75%
 function structMastered(m) { return m && m.seen >= 4 && m.correct / m.seen >= 0.75; }
 
+/* 话步课程表：每种沟通意图的 move 公式（产出侧的"结构课程表"）。
+   判分按公式逐步检查，话步级计数自动发现用户的系统性缺口——机制化，不做单点补丁 */
+const MOVES = {
+  disagree: { zh: "反对", moves: [["buffer", "先接住对方"], ["position", "亮明立场+理由"], ["alternative", "给出替代/出口"]] },
+  badnews: { zh: "坏消息", moves: [["headline", "结论先行"], ["impact", "说清影响"], ["next", "给出下一步"]] },
+  request: { zh: "请求", moves: [["context", "一句背景"], ["ask", "明确的ask"], ["deadline", "时限/程度"]] },
+  push: { zh: "催进度", moves: [["fact", "摆事实非指责"], ["impact", "为什么急"], ["ask", "具体要什么"]] },
+  decide: { zh: "通知决策", moves: [["decision", "决策本身"], ["reason", "理由"], ["action", "行动项"]] },
+  propose: { zh: "试探提议", moves: [["option", "抛出选项"], ["invite", "邀请意见"]] },
+};
+
 const KEY = "wec_state_v1";
 const DEFAULT_STATE = {
   placementDone: false,
@@ -98,6 +109,7 @@ const DEFAULT_STATE = {
   selfChecks: [],        // 每周自评：{date,score 1-3}，系统内唯一刷不了的外部校标
   gistOk: 0,             // 主旨题累计答对数：<3 时启用脚手架（预标功能标签+时限放宽），答对3次后撤除
   examHistory: [],       // 考试成绩单：{date, lines:{decode:{lv,acc,wpm},...}} —— 独立于日常训练的水平测量
+  moveStats: {},         // 话步账本：{"disagree.buffer": {seen, miss}} —— 系统自己发现"你总漏哪一步"
 };
 
 /* ---------------- 云同步（GitHub Gist 作为进度存储）---------------- */
@@ -326,20 +338,20 @@ ANATOMY: also return each sentence of the passage tagged with its discourse role
     // 草稿必须是"这个学习者"的真实弱点，不是母语者的口头语病
     const draftVoice = ` THE DRAFT MUST BE IN THE LEARNER'S VOICE — a Chinese professional's typical weak draft: tone-intent mismatch, Chinglish or direct-translation phrasing, over-politeness, vagueness, minor article/tense slips. NEVER use native-speaker spoken fillers ("like,", "kinda", "y'know", "gonna") — this learner would never type those.`;
     // 核心理念：语域 = 语气与意图匹配。犹豫/软化不是错误，错位才是错误
-    const intentRules = ` EVERY rewrite question MUST state the learner's communicative INTENT in the "intent" field (Chinese, e.g. "你已拍板，通知团队" / "你有初步想法，想听大家意见" / "你不同意上级的方案，需要委婉表达" / "请求同事帮忙" / "传达坏消息" / "催进度"). ROTATE across these intents — do not always pick decisive ones. THE GOLDEN RULE: hedging is a TOOL, not an error. If the intent is tentative (seeking input, soft disagreement), the polished version MUST KEEP well-formed softeners (What if we... / One option could be... / I'm leaning toward X, curious what you think) — stripping them would be WRONG. The only tone error is MISMATCH between tone and intent: sounding tentative when announcing a decision, or sounding decided when consulting. The draft's flaw should often be exactly such a mismatch.`;
+    const intentRules = ` EVERY rewrite question MUST state the learner's communicative INTENT in the "intent" field (Chinese, e.g. "你已拍板，通知团队" / "你有初步想法，想听大家意见" / "你不同意上级的方案，需要委婉表达" / "请求同事帮忙" / "传达坏消息" / "催进度"), AND an "intentKey" field from exactly: disagree|badnews|request|push|decide|propose. ROTATE across these intents — do not always pick decisive ones. THE GOLDEN RULE: hedging is a TOOL, not an error. If the intent is tentative (seeking input, soft disagreement), the polished version MUST KEEP well-formed softeners (What if we... / One option could be... / I'm leaning toward X, curious what you think) — stripping them would be WRONG. The only tone error is MISMATCH between tone and intent: sounding tentative when announcing a decision, or sounding decided when consulting. The draft's flaw should often be exactly such a mismatch.`;
     if (level === 1) {
       // 一题三判：单次语气判断信息密度太低，打包三句算一题（全对才算对）
       spec = `Question type "judge3": THREE short business-context sentences, each with a clearly identifiable register (casual / neutral / formal — the three sentences should cover different registers, in random order). Each sentence must be something a real person could genuinely write at work — no cartoonish slang.`;
       schema = `{"kind":"judge3","options":["Casual","Neutral","Formal"],"items":[{"sentence":"...","answerIndex":0,"why":"which words signal it (one short sentence)"},{"sentence":"...","answerIndex":1,"why":"..."},{"sentence":"...","answerIndex":2,"why":"..."}]}`;
     } else if (level === 3) {
       spec = `Question type "rewrite": a realistic FIRST DRAFT containing 1-2 typical Chinese-speaker errors (Chinglish phrasing, wrong collocation, article/tense slip) — the kind of sentence the learner might actually type. Learner polishes it into what they would actually send.${draftVoice}${intentRules}${mediumRules}`;
-      schema = `{"kind":"rewrite","sentence":"...","intent":"<中文：你的沟通意图>","scenario":"...","note":"the errors planted + the intent + the medium's conventions (for grading)"}`;
+      schema = `{"kind":"rewrite","sentence":"...","intent":"<中文：你的沟通意图>","intentKey":"disagree|badnews|request|push|decide|propose","scenario":"...","note":"the errors planted + the intent + the medium's conventions (for grading)"}`;
     } else if (level >= 4) {
       spec = `Question type "rewrite": give a Chinese bullet point (one idea) plus a scenario (slide title/body, IM to a senior stakeholder, or external email). Learner writes medium-appropriate English.${intentRules}${mediumRules}`;
-      schema = `{"kind":"rewrite","sentence":"<the Chinese point>","intent":"<中文：你的沟通意图>","scenario":"...","note":"key intent/register/medium expectations (for grading)"}`;
+      schema = `{"kind":"rewrite","sentence":"<the Chinese point>","intent":"<中文：你的沟通意图>","intentKey":"disagree|badnews|request|push|decide|propose","scenario":"...","note":"key intent/register/medium expectations (for grading)"}`;
     } else {
       spec = `Question type "rewrite": a realistic FIRST DRAFT — the kind of sentence a Chinese professional would actually type quickly at work (tone mismatched with intent, vague, or awkward for the medium), never a cartoonishly casual sentence no one would write.${draftVoice} The learner polishes the draft into what they would actually send or show.${intentRules}${mediumRules}`;
-      schema = `{"kind":"rewrite","sentence":"...","intent":"<中文：你的沟通意图>","scenario":"...","note":"what the polished version must achieve given the intent and medium (for grading)"}`;
+      schema = `{"kind":"rewrite","sentence":"...","intent":"<中文：你的沟通意图>","intentKey":"disagree|badnews|request|push|decide|propose","scenario":"...","note":"what the polished version must achieve given the intent and medium (for grading)"}`;
     }
   } else {
     const multi = level >= 4;
@@ -353,7 +365,7 @@ ANATOMY: also return each sentence of the passage tagged with its discourse role
     const useRelay = level >= 2 && Math.random() < 0.4;
     if (useRelay) {
       spec = `Question type "relay": simulate a live meeting moment. A colleague or boss says ONE line in English directed at the learner (a question, a pushback, or a request for the learner's view). The learner must type a reply in English under time pressure.${multi ? " The situation should call for a multi-move reply (acknowledge → state position → propose next step)." : " The situation should call for a ONE-SENTENCE reply, and the Chinese point MUST be short — at most ~40 Chinese characters, expressible as one natural English sentence. Never give a multi-move point at this level."} Include who is speaking in the scenario. CRITICAL — separate content from language: the learner must never have to invent WHAT to say; give them their intended reply as a short Chinese point ("chinese" field) — a natural, defensible response (e.g. 不同意+理由+替代方案). The question tests only HOW to say it in English.`;
-      schema = `{"kind":"relay","sentence":"<the line spoken to the learner>","chinese":"<你要表达的意思，中文要点>","scenario":"...","note":"what a strong reply must accomplish (for grading)"}`;
+      schema = `{"kind":"relay","sentence":"<the line spoken to the learner>","chinese":"<你要表达的意思，中文要点>","intentKey":"disagree|badnews|request|push|decide|propose","scenario":"...","note":"what a strong reply must accomplish (for grading)"}`;
     } else {
       spec = `Question type "compose": a realistic meeting moment. Give the meaning to express in Chinese${multi ? " (three linked moves: raise an issue → suggest → ask for input)" : " (ONE sentence, at most ~40 Chinese characters)"}${level === 1 ? ", plus a pattern hint like \"I'd suggest we...\"" : ""}${level === 3 ? ", and REQUIRE a given workplace pattern (e.g. \"My concern is...\", \"To build on that...\")" : ""}. Learner types the English under time pressure.`;
       schema = `{"kind":"compose","chinese":"...","scenario":"...","patternHint":${level === 1 ? '"..."' : "null"},"requiredPhrase":${level === 3 ? '"..."' : "null"},"note":"what a strong answer includes (for grading)"}`;
@@ -445,8 +457,8 @@ Grade it. Hints must point at problems WITHOUT giving the corrected words (coach
 If the scenario names a medium, grade against that medium's REAL conventions — slide bullet: concise, fragments acceptable; IM: brief and natural-professional; external email: complete formal sentences. The reference must be what a competent native professional would ACTUALLY write in that medium, not textbook prose. Do not penalize concision that fits the medium.
 FAITHFULNESS: the reference must preserve the original's factual content — never invent or upgrade facts the writer did not state (e.g. "some issues" must NOT become "critical bugs"), and never add NEW commitments, deadlines, or requests the draft does not contain (e.g. do NOT invent "by EOD" or "please confirm"). If adding a call-to-action or specifics would strengthen the message in real life, say so in the explanation as ADVICE ONLY — the reference itself stays faithful. Also: do not "correct" wording that is already idiomatic native usage in that medium.
 If the question gives the intended content as a Chinese point, grade ONLY how well the English expresses that point — never judge the position itself, and never penalize content that follows the given point.
-DISAGREEMENT MOVE: when the intent involves disagreeing, pushing back, or delivering an unwelcome view, check specifically whether the answer OPENS with an acknowledgment move ("I see your point…" / "That makes sense…" / "Fair point…") before the counter-position. If missing, add an issue tagged "register" with a hint pointing at the missing buffer opening. If present and natural, credit it in the explanation.
-TONE = INTENT MATCH: if an "intent" is given, the ONLY tone standard is whether the tone matches that intent. Hedging is a TOOL, not an error — when the intent is tentative (seeking input, soft disagreement), well-formed softeners (What if we... / One option could be... / I'm leaning toward X) are REQUIRED and stripping them is an error; when the intent is announcing a decision, tentative phrasing is the error. NEVER universally reward "more confident/direct". The reference must express the SAME intent with matched tone.
+${q.intentKey && MOVES[q.intentKey] ? `MOVE CHECK: this intent (${MOVES[q.intentKey].zh}) expects these discourse moves in a strong answer: ${MOVES[q.intentKey].moves.map(([k, zh]) => `"${k}"(${zh})`).join(", ")}. Judge EACH move's presence and quality INDEPENDENTLY of grammar, and return "moves":[{"m":"<move key>","ok":true|false}] in your JSON. A missing move is a tone-structure issue (tag "register"); credit well-executed moves in the explanation.
+` : ""}TONE = INTENT MATCH: if an "intent" is given, the ONLY tone standard is whether the tone matches that intent. Hedging is a TOOL, not an error — when the intent is tentative (seeking input, soft disagreement), well-formed softeners (What if we... / One option could be... / I'm leaning toward X) are REQUIRED and stripping them is an error; when the intent is announcing a decision, tentative phrasing is the error. NEVER universally reward "more confident/direct". The reference must express the SAME intent with matched tone.
 PHRASE VERDICT: if the question has a requiredPhrase, include "phraseOk" in your JSON — true only if the learner used that phrase correctly and naturally. Judge this INDEPENDENTLY of all other errors: a sentence with a tense slip elsewhere but a perfect use of the required phrase gets phraseOk=true; a high-scoring sentence that used the phrase awkwardly gets phraseOk=false.
 CARDS: extract 0-2 reusable PHRASE-LEVEL upgrades worth memorizing (a set phrase, collocation, or pattern — NOT a whole sentence). For each: "weak" = what the learner wrote or a typical weak version, "better" = the natural professional phrase (≤5 words), "note" = a ≤8-word Chinese hint on when/how to use it. Only include genuinely reusable expressions; if the answer was already strong, return [].
 Return ONLY valid JSON: {"score":0-100,"pass":true|false (pass = score>=70),"phraseOk":true|false|null (null if no requiredPhrase),"issues":[{"tag":"...","hint":"one short English sentence pointing at the problem"}],"reference":"a strong native version","explanation":"2-3 plain-English sentences on why the reference works better","cards":[{"weak":"...","better":"...","note":"..."}]}`;
@@ -491,6 +503,17 @@ function applyResult(state, line, res) {
   }
   // 主旨题脚手架计数：累计答对3次后撤除预标标签
   if (line === "decode" && res.kind === "gist" && correct) s.gistOk = (s.gistOk || 0) + 1;
+  // 话步账本：逐步记账，漏得多的步就是你的系统性缺口（产品自己发现，不等用户报告）
+  if (res.intentKey && Array.isArray(res.moves) && MOVES[res.intentKey]) {
+    const ms = { ...(s.moveStats || {}) };
+    res.moves.forEach((m) => {
+      if (!m || !m.m) return;
+      const key = res.intentKey + "." + m.m;
+      const cur = ms[key] || { seen: 0, miss: 0 };
+      ms[key] = { seen: cur.seen + 1, miss: cur.miss + (m.ok ? 0 : 1) };
+    });
+    s.moveStats = ms;
+  }
   // 错题重考：通过→间隔升档（逐渐淡出），又错→归零重来
   if (retestId) {
     s.wrongBook = (s.wrongBook || []).map((w) => w.id === retestId ? { ...w, srs: correct ? srsAdvance(w.srs) : srsReset() } : w);
@@ -778,6 +801,7 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
       reviewCardId: q.reviewCardId || null, reviewOk: !!(usedReviewWord && g.phraseOk !== false),
       score: g.score != null ? g.score : (g.correct ? 100 : 0),
       retestId: q.retestId || null,
+      moves: Array.isArray(g.moves) ? g.moves : null, intentKey: q.intentKey || null, // 话步检查结果
       line: q.line, kind: q.kind,
       qText: isBatch ? (q.items || []).map((it) => it.sentence).join(" | ") : (q.sentence || q.passage || q.chinese || ""),
       materialId: q.materialId,
@@ -851,15 +875,20 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
       {/* READ PHASE: 读题消化不计时，开表后只压英语产出 */}
       {phase === "read" && (
         <div>
-          {q.line === "register" ? (
-            <p style={{ fontSize: 13, color: "#7A3EF0", lineHeight: 1.6, margin: "0 0 12px", fontWeight: 600 }}>
-              ⚖️ 这是语气题，不是翻译题。先回答自己两个问题：①我的意图是什么档位（拍板/试探/反对…）？②如果是反对——缓冲开场准备好了吗（I see your point, but…）？想清楚再开表。
-            </p>
-          ) : (
-            <p style={{ fontSize: 13, color: C.sub, lineHeight: 1.6, margin: "0 0 12px" }}>
-              ⚡ 组句题：先消化场景和要表达的内容，在脑子里组织好思路——这一步不计时。倒计时只测一件事：把想法变成英语的速度。
-            </p>
-          )}
+          {(() => {
+            const mv = q.intentKey && MOVES[q.intentKey];
+            const formula = mv ? mv.moves.map(([, zh]) => zh).join(" → ") : null;
+            if (q.line === "register") return (
+              <p style={{ fontSize: 13, color: "#7A3EF0", lineHeight: 1.6, margin: "0 0 12px", fontWeight: 600 }}>
+                ⚖️ 这是语气题，不是翻译题。{formula ? `「${mv.zh}」的话步公式：${formula}。想清楚每一步说什么，再开表。` : "先想清楚意图该用什么档位的语气，再开表。"}
+              </p>
+            );
+            return (
+              <p style={{ fontSize: 13, color: C.sub, lineHeight: 1.6, margin: "0 0 12px" }}>
+                ⚡ 组句题：先消化场景和要表达的内容{formula ? `（「${mv.zh}」的话步：${formula}）` : ""}——这一步不计时。倒计时只测一件事：把想法变成英语的速度。
+              </p>
+            );
+          })()}
           <Btn onClick={() => setPhase("answer")}>想好了，开始作答 ⏱ {q.timeLimit}s</Btn>
         </div>
       )}
@@ -983,6 +1012,15 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
             <Tag tone={grade.pass ? "good" : "bad"}>{grade.pass ? `PASS · ${grade.score}` : `SCORE ${grade.score}`}</Tag>
             {attempt === 2 && <Tag tone="amber">2nd attempt</Tag>}
           </div>
+          {q.intentKey && MOVES[q.intentKey] && Array.isArray(grade.moves) && grade.moves.length > 0 && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10, alignItems: "center" }}>
+              <span style={{ ...mono, fontSize: 10, color: C.sub }}>话步</span>
+              {grade.moves.map((m, i) => {
+                const zh = ((MOVES[q.intentKey].moves.find(([k]) => k === m.m) || [])[1]) || m.m;
+                return <Tag key={i} tone={m.ok ? "good" : "bad"}>{m.ok ? "✓" : "✗"} {zh}</Tag>;
+              })}
+            </div>
+          )}
           {(grade.issues || []).length > 0 && (
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
               {grade.issues.map((iss, i) => <Tag key={i} tone="bad">{iss.tag}</Tag>)}
@@ -1569,6 +1607,25 @@ function Profile({ state, onExit, onRetest, onDeleteCard, onAddCard }) {
           );
         })}
       </div>
+      {Object.values(state.moveStats || {}).some((v) => v.miss > 0) && (
+        <div style={{ background: C.surface, borderRadius: 14, padding: 18, marginBottom: 14 }}>
+          <p style={{ ...mono, fontSize: 11, color: C.sub, margin: "0 0 10px" }}>MOVES 话步弱点 — 系统自动发现的"你总漏的那一步"</p>
+          {Object.entries(state.moveStats || {}).filter(([, v]) => v.miss > 0).sort((a, b) => b[1].miss - a[1].miss).slice(0, 8).map(([k, v]) => {
+            const [ik, mk] = k.split(".");
+            const intent = MOVES[ik];
+            const zh = intent ? ((intent.moves.find(([m]) => m === mk) || [])[1] || mk) : mk;
+            return (
+              <div key={k} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 7 }}>
+                <span style={{ fontSize: 12, minWidth: 150, color: C.ink }}>{intent ? intent.zh : ik} · {zh}</span>
+                <div style={{ flex: 1, height: 8, background: C.bg, borderRadius: 4 }}>
+                  <div style={{ width: `${Math.round((v.miss / v.seen) * 100)}%`, height: "100%", background: C.bad, borderRadius: 4 }} />
+                </div>
+                <span style={{ ...mono, fontSize: 11, color: C.sub }}>漏 {v.miss}/{v.seen}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
       <div style={{ background: C.surface, borderRadius: 14, padding: 18, marginBottom: 14 }}>
         <p style={{ ...mono, fontSize: 11, color: C.sub, margin: "0 0 10px" }}>ERROR MAP — {totalErr} logged</p>
         {sorted.length === 0 && <p style={{ fontSize: 13, color: C.sub }}>No errors logged yet. They'll appear here and drive your revenge questions.</p>}
