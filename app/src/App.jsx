@@ -96,6 +96,7 @@ const DEFAULT_STATE = {
   speedLog: [],          // 流利度日志：每题 {t,line,ok,frac(用时/时限)}，自动化的金标准是"正确率不降、用时下降"
   placementHistory: [],  // 摸底历史：每次摸底/重测的 {date,levels}，保住基线
   selfChecks: [],        // 每周自评：{date,score 1-3}，系统内唯一刷不了的外部校标
+  gistOk: 0,             // 主旨题累计答对数：<3 时启用脚手架（预标功能标签+时限放宽），答对3次后撤除
 };
 
 /* ---------------- 云同步（GitHub Gist 作为进度存储）---------------- */
@@ -314,8 +315,9 @@ THE 4 OPTIONS (must all be trivially easy to read):
 SELF-CHECK before returning: (1) does the answerIndex option commit any misreading your "why" describes? (2) can any distractor be ruled out by common sense alone, without reading the sentence? If either is true, fix it.`;
       schema = `{"kind":"trunk","sentence":"...","options":["...","...","...","..."],"answerIndex":0,"why":"1-2 sentences: how this structure misleads, plus a transferable routine for spotting the core in ANY sentence with this structure","core":{"subject":"<the grammatical subject HEAD, copied EXACTLY from the sentence (short — the head noun phrase, not its long modifiers)>","verb":"<the main verb (with auxiliaries), copied EXACTLY>","object":"<the object/complement copied EXACTLY, or null if none>"}}`;
     } else {
-      spec = `Question type "gist": a realistic slide-style paragraph (3-5 sentences${level === 5 ? ", include 1-2 business acronyms/jargon" : ""}).${st ? ` At least one key sentence must be built on this target structure: ${st.en}.` : ""} The learner must summarize the gist in one line${level === 5 ? " in English" : ""}.`;
-      schema = `{"kind":"gist","passage":"...","note":"what a good gist must capture (for grading, not shown to learner)"}`;
+      spec = `Question type "gist": a realistic slide-style paragraph (3-5 sentences${level === 5 ? ", include 1-2 business acronyms/jargon" : ""}).${st ? ` At least one key sentence must be built on this target structure: ${st.en}.` : ""} The learner must summarize the gist in one line${level === 5 ? " in English" : ""}.
+ANATOMY: also return each sentence of the passage tagged with its discourse role — this teaches the transferable routine "tag each sentence's function, then gist = problem + core actions (+ timeline), drop details". Roles: "problem" (问题/现状), "action" (行动/措施), "result" (预期效果), "timeline" (时间/节奏), "detail" (可忽略细节). Copy each sentence EXACTLY; the passage must be exactly these sentences joined.`;
+      schema = `{"kind":"gist","passage":"...","anatomy":[{"sentence":"<exact sentence>","role":"problem|action|result|timeline|detail","zh":"<≤6字中文功能标签，如 问题/行动①/预期效果/节奏>"}],"note":"what a good gist must capture (for grading, not shown to learner)"}`;
     }
   } else if (line === "register") {
     // 语域 = 符合媒介惯例，不是一味"更正式"。所有产出题按真实媒介的文体标准要求
@@ -374,6 +376,11 @@ Return ONLY valid JSON, no markdown, schema: ${schema}`;
   q.timeLimit = timeLimitFor(line, level, q.kind);
   // 复习题练的是"从记忆里提取短语"，比自由作答多一道工序，时限放宽 1.5 倍
   if (reviewCard && q.timeLimit > 0) q.timeLimit = Math.round(q.timeLimit * 1.5);
+  // 主旨题脚手架渐撤：累计答对<3次时，答题界面预标功能标签+时限×1.5，避免 L3→L4 断崖直坠恐慌区
+  if (q.kind === "gist") {
+    q.scaffold = (state.gistOk || 0) < 3;
+    if (q.scaffold && q.timeLimit > 0) q.timeLimit = Math.round(q.timeLimit * 1.5);
+  }
   q.revenge = !!revengeTag;
   q.structKey = structKey;
   q.reviewCardId = reviewCard ? reviewCard.id : null;
@@ -479,6 +486,8 @@ function applyResult(state, line, res) {
     s.structMastery = { ...s.structMastery, [structKey]: { seen: m.seen + 1, correct: m.correct + (correct ? 1 : 0), srs: correct ? srsAdvance(m.srs) : srsReset() } };
     s.lastStruct = { key: structKey, correct };
   }
+  // 主旨题脚手架计数：累计答对3次后撤除预标标签
+  if (line === "decode" && res.kind === "gist" && correct) s.gistOk = (s.gistOk || 0) + 1;
   // 错题重考：通过→间隔升档（逐渐淡出），又错→归零重来
   if (retestId) {
     s.wrongBook = (s.wrongBook || []).map((w) => w.id === retestId ? { ...w, srs: correct ? srsAdvance(w.srs) : srsReset() } : w);
@@ -625,6 +634,34 @@ function AnnotatedSentence({ sentence, core }) {
   );
 }
 
+/* ---------------- 段落解剖：逐句功能标签 + 主旨公式（多句版的"主谓宾划线"） ---------------- */
+const GIST_ROLES = {
+  problem: ["问题", "#D64545"], action: ["行动", "#2E5BFF"], result: ["预期效果", "#0E9F6E"],
+  timeline: ["节奏", "#C77D1F"], detail: ["细节·可忽略", "#5A6B85"],
+};
+function ParagraphAnatomy({ anatomy, formula }) {
+  if (!Array.isArray(anatomy) || !anatomy.length) return null;
+  return (
+    <div>
+      {formula && (
+        <p style={{ ...mono, fontSize: 11, color: C.sub, margin: "0 0 8px", letterSpacing: 0.3 }}>
+          主旨公式 = <span style={{ color: "#D64545" }}>问题</span> + <span style={{ color: "#2E5BFF" }}>核心行动</span> +（<span style={{ color: "#C77D1F" }}>节奏</span>）· 细节句直接扔掉
+        </p>
+      )}
+      {anatomy.map((s, i) => {
+        const [label, color] = GIST_ROLES[s.role] || ["", C.sub];
+        const dim = s.role === "detail";
+        return (
+          <div key={i} style={{ borderLeft: `3px solid ${color}`, background: "#fff", borderRadius: 6, padding: "8px 12px", marginBottom: 6, opacity: dim ? 0.55 : 1 }}>
+            <span style={{ ...mono, fontSize: 10, fontWeight: 700, color, letterSpacing: 0.5 }}>{s.zh || label}</span>
+            <p style={{ margin: "3px 0 0", fontSize: 14, lineHeight: 1.6, color: C.ink }}>{s.sentence}</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ---------------- Question Card ---------------- */
 function QuestionCard({ q, onDone, qNum, qTotal }) {
   // 组句/接龙题两段式：读题不计时（真实会议里"想说什么"本就在脑子里，读中文要点是装置开销），开表后只压英语产出
@@ -728,7 +765,7 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
       structKey: q.structKey, wrongEntry, cards,
       reviewCardId: q.reviewCardId || null, reviewOk: !!(usedReviewWord && grade.phraseOk !== false),
       retestId: q.retestId || null,
-      line: q.line,
+      line: q.line, kind: q.kind,
       qText: isBatch ? (q.items || []).map((it) => it.sentence).join(" | ") : (q.sentence || q.passage || q.chinese || ""),
       materialId: q.materialId,
       timeUsed: q.timeLimit > 0 ? q.timeLimit - left : null, // 答对的也记时——流利度=正确率不降、用时下降
@@ -772,9 +809,16 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
       )}
 
       <div style={{ background: C.bg, borderRadius: 10, padding: 14, marginBottom: 14, display: isBatch ? "none" : "block" }}>
-        <p style={{ margin: 0, fontSize: 16, lineHeight: 1.65, color: C.ink, whiteSpace: "pre-wrap" }}>
-          {q.sentence || q.passage || q.chinese}
-        </p>
+        {q.kind === "gist" && q.scaffold && Array.isArray(q.anatomy) && q.anatomy.length ? (
+          <div>
+            <p style={{ fontSize: 12, color: C.sub, margin: "0 0 8px" }}>🪜 新手脚手架：功能标签已帮你标好（答对 3 次后撤除）——你只需练"组装主旨"这一步</p>
+            <ParagraphAnatomy anatomy={q.anatomy} formula />
+          </div>
+        ) : (
+          <p style={{ margin: 0, fontSize: 16, lineHeight: 1.65, color: C.ink, whiteSpace: "pre-wrap" }}>
+            {q.sentence || q.passage || q.chinese}
+          </p>
+        )}
         {q.kind === "relay" && q.chinese && (
           <p style={{ margin: "10px 0 0", paddingTop: 10, borderTop: `1px dashed ${C.line}`, fontSize: 14, lineHeight: 1.6, color: C.accent }}>
             你要表达：{q.chinese}
@@ -899,6 +943,11 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
               </div>
             ))}
           </div>
+          {q.kind === "gist" && Array.isArray(q.anatomy) && q.anatomy.length > 0 && (
+            <div style={{ padding: 12, background: C.bg, borderRadius: 10, marginBottom: 10 }}>
+              <ParagraphAnatomy anatomy={q.anatomy} formula />
+            </div>
+          )}
           <textarea value={input} onChange={(e) => setInput(e.target.value)} rows={3}
             style={{ width: "100%", boxSizing: "border-box", borderRadius: 10, border: `2px solid ${C.amber}`, padding: 12, fontSize: 15, ...body, resize: "vertical", outline: "none" }} />
           <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
@@ -918,6 +967,12 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
           {(grade.issues || []).length > 0 && (
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
               {grade.issues.map((iss, i) => <Tag key={i} tone="bad">{iss.tag}</Tag>)}
+            </div>
+          )}
+          {q.kind === "gist" && Array.isArray(q.anatomy) && q.anatomy.length > 0 && (
+            <div style={{ padding: 12, background: C.bg, borderRadius: 10, marginBottom: 10 }}>
+              <p style={{ ...mono, fontSize: 10, color: C.sub, margin: "0 0 8px", letterSpacing: 1 }}>段落解剖 — 熟练读者的内心戏</p>
+              <ParagraphAnatomy anatomy={q.anatomy} formula />
             </div>
           )}
           <div style={{ padding: 12, background: C.goodSoft, borderRadius: 10, marginBottom: 10 }}>
