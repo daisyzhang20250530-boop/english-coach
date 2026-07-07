@@ -97,6 +97,7 @@ const DEFAULT_STATE = {
   placementHistory: [],  // 摸底历史：每次摸底/重测的 {date,levels}，保住基线
   selfChecks: [],        // 每周自评：{date,score 1-3}，系统内唯一刷不了的外部校标
   gistOk: 0,             // 主旨题累计答对数：<3 时启用脚手架（预标功能标签+时限放宽），答对3次后撤除
+  examHistory: [],       // 考试成绩单：{date, lines:{decode:{lv,acc,wpm},...}} —— 独立于日常训练的水平测量
 };
 
 /* ---------------- 云同步（GitHub Gist 作为进度存储）---------------- */
@@ -315,7 +316,7 @@ THE 4 OPTIONS (must all be trivially easy to read):
 SELF-CHECK before returning: (1) does the answerIndex option commit any misreading your "why" describes? (2) can any distractor be ruled out by common sense alone, without reading the sentence? If either is true, fix it.`;
       schema = `{"kind":"trunk","sentence":"...","options":["...","...","...","..."],"answerIndex":0,"why":"1-2 sentences: how this structure misleads, plus a transferable routine for spotting the core in ANY sentence with this structure","core":{"subject":"<the grammatical subject HEAD, copied EXACTLY from the sentence (short — the head noun phrase, not its long modifiers)>","verb":"<the main verb (with auxiliaries), copied EXACTLY>","object":"<the object/complement copied EXACTLY, or null if none>"}}`;
     } else {
-      spec = `Question type "gist": a realistic slide-style paragraph (3-5 sentences${level === 5 ? ", include 1-2 business acronyms/jargon" : ""}).${st ? ` At least one key sentence must be built on this target structure: ${st.en}.` : ""} The learner must summarize the gist in one line${level === 5 ? " in English" : ""}.
+      spec = `Question type "gist": ${opts.genre === "email" ? "a realistic work EMAIL (3-5 sentences: greeting-free body with context, a concrete ask, and a deadline buried mid-text). The learner must summarize in one line WHAT is being asked and BY WHEN" : `a realistic slide-style paragraph (3-5 sentences${level === 5 ? ", include 1-2 business acronyms/jargon" : ""})`}.${st ? ` At least one key sentence must be built on this target structure: ${st.en}.` : ""} The learner must summarize the gist in one line${level === 5 ? " in English" : ""}.
 ANATOMY: also return each sentence of the passage tagged with its discourse role — this teaches the transferable routine "tag each sentence's function, then gist = problem + core actions (+ timeline), drop details". Roles: "problem" (问题/现状), "action" (行动/措施), "result" (预期效果), "timeline" (时间/节奏), "detail" (可忽略细节). Copy each sentence EXACTLY; the passage must be exactly these sentences joined.`;
       schema = `{"kind":"gist","passage":"...","anatomy":[{"sentence":"<exact sentence>","role":"problem|action|result|timeline|detail","zh":"<≤6字中文功能标签，如 问题/行动①/预期效果/节奏>"}],"note":"what a good gist must capture (for grading, not shown to learner)"}`;
     }
@@ -343,7 +344,7 @@ ANATOMY: also return each sentence of the passage tagged with its discourse role
   } else {
     const multi = level >= 4;
     // 卡池复习：复习入口必给卡；日常 session 只在有"到期"卡时以 35% 概率插入（SRS 不到期不打扰）
-    reviewCard = opts.forceReview ? pickReviewCard(state) : (Math.random() < 0.6 ? pickReviewCard(state, { dueOnly: true }) : null); // 混编后组句题变少，提高到期卡插队概率
+    reviewCard = opts.exam ? null : opts.forceReview ? pickReviewCard(state) : (Math.random() < 0.6 ? pickReviewCard(state, { dueOnly: true }) : null); // 考试不插复习卡；混编后组句题变少，提高到期卡插队概率
     if (reviewCard) {
       spec = `Question type "compose" (PHRASE REVIEW). Give a realistic meeting moment as a Chinese point to express, with a scenario. The learner MUST use the phrase "${reviewCard.better}" naturally in their English answer. Pick a fresh situation where this phrase fits well.`;
       schema = `{"kind":"compose","chinese":"...","scenario":"...","patternHint":null,"requiredPhrase":"${reviewCard.better}","note":"a strong answer uses the required phrase naturally"}`;
@@ -377,8 +378,9 @@ Return ONLY valid JSON, no markdown, schema: ${schema}`;
   // 复习题练的是"从记忆里提取短语"，比自由作答多一道工序，时限放宽 1.5 倍
   if (reviewCard && q.timeLimit > 0) q.timeLimit = Math.round(q.timeLimit * 1.5);
   // 主旨题脚手架渐撤：累计答对<3次时，答题界面预标功能标签+时限×1.5，避免 L3→L4 断崖直坠恐慌区
+  // 考试模式素颜应试：脚手架强制关闭
   if (q.kind === "gist") {
-    q.scaffold = (state.gistOk || 0) < 3;
+    q.scaffold = !opts.exam && (state.gistOk || 0) < 3;
     if (q.scaffold && q.timeLimit > 0) q.timeLimit = Math.round(q.timeLimit * 1.5);
   }
   q.revenge = !!revengeTag;
@@ -410,7 +412,7 @@ function pickMaterialSentence(state) {
 
 /* ---------------- 预取：答题时后台生成下一题，消除等待 ---------------- */
 const _prefetch = { key: null, promise: null };
-const _qKeyOf = (line, level, revengeTag, opts = {}) => [line, level, revengeTag || "", opts.forceReview ? 1 : 0, opts.forceStruct || "", opts.retestId || ""].join("|");
+const _qKeyOf = (line, level, revengeTag, opts = {}) => [line, level, revengeTag || "", opts.forceReview ? 1 : 0, opts.forceStruct || "", opts.retestId || "", opts.exam ? 1 : 0, opts.genre || ""].join("|");
 function prefetchQuestion(line, level, state, revengeTag, opts = {}) {
   const key = _qKeyOf(line, level, revengeTag, opts);
   if (_prefetch.key === key) return; // 已在预取同参数的题
@@ -663,7 +665,7 @@ function ParagraphAnatomy({ anatomy, formula }) {
 }
 
 /* ---------------- Question Card ---------------- */
-function QuestionCard({ q, onDone, qNum, qTotal }) {
+function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
   // 组句/接龙题两段式：读题不计时（真实会议里"想说什么"本就在脑子里，读中文要点是装置开销），开表后只压英语产出
   const [phase, setPhase] = useState(() => (q.kind === "compose" || q.kind === "relay" ? "read" : "answer")); // read | answer | grading | coach | reveal | mcqdone
   const [input, setInput] = useState("");
@@ -693,13 +695,17 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
     if (auto) timedOutRef.current = true;
     if (isBatch) {
       const per = (q.items || []).map((it, i) => picks[i] === it.answerIndex);
-      setGrade({ correct: per.every(Boolean), per }); // 全对才算对——连对2题=连续判对6句，L1毕业证据更扎实
+      const g = { correct: per.every(Boolean), per }; // 全对才算对——连对2题=连续判对6句，L1毕业证据更扎实
+      setGrade(g);
+      if (silent) { finish(g); return; } // 考试模式：不显示反馈，直接交卷
       setPhase("mcqdone");
       return;
     }
     if (isMCQ) {
       const correct = picked === q.answerIndex && picked !== null;
-      setGrade({ correct });
+      const g = { correct };
+      setGrade(g);
+      if (silent) { finish(g); return; }
       setPhase("mcqdone");
       return;
     }
@@ -707,9 +713,12 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
     try {
       const g = await gradeAnswer(q, inputRef.current);
       setGrade(g);
+      if (silent) { finish(g); return; }
       setPhase(g.pass ? "reveal" : "coach");
     } catch (e) {
-      setGrade({ score: 0, pass: false, issues: [], reference: "—", explanation: "Grading failed — network issue. This question won't count." });
+      const g = { score: 0, pass: false, issues: [], reference: "—", explanation: "Grading failed — network issue. This question won't count." };
+      setGrade(g);
+      if (silent) { finish(g); return; }
       setPhase("reveal");
     }
   }
@@ -724,10 +733,11 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
     } catch (e) { setPhase("reveal"); }
   }
 
-  function finish() {
+  function finish(gOverride) {
+    const g = gOverride || grade; // 静默模式（考试）直接传入判分结果，绕过 state 时序
     let correct, tags = [];
-    if (isMCQ || isBatch) { correct = grade.correct; if (isBatch && !correct) tags = ["register"]; }
-    else { correct = !!grade.pass && attempt === 1; tags = (grade.issues || []).map((i) => i.tag); }
+    if (isMCQ || isBatch) { correct = g.correct; if (isBatch && !correct) tags = ["register"]; }
+    else { correct = !!g.pass && attempt === 1; tags = (g.issues || []).map((i) => i.tag); }
     const label = (i) => (i == null ? "(未选)" : q.options[i]);
     let wrongEntry = null;
     if (!correct) {
@@ -745,12 +755,12 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
           : (inputRef.current || "(超时未答)"),
         reference: isBatch
           ? (q.items || []).map((it) => q.options[it.answerIndex]).join(" / ")
-          : isMCQ ? q.options[q.answerIndex] : (grade.reference || ""),
+          : isMCQ ? q.options[q.answerIndex] : (g.reference || ""),
         issues: isBatch
           ? (q.items || []).filter((it, i) => picks[i] !== it.answerIndex).map((it) => ({ tag: "register", hint: it.why || it.sentence }))
           : isMCQ
           ? (q.why ? [{ tag: "structure-misread", hint: q.why }] : [])
-          : (grade.issues || []),
+          : (g.issues || []),
         timedOut: timedOutRef.current, // 超时(没读完/没写完)和误读是两种不同的问题
         timeUsed: q.timeLimit > 0 ? q.timeLimit - left : null,
         timeLimit: q.timeLimit > 0 ? q.timeLimit : null,
@@ -758,12 +768,13 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
     }
     // 卡池：抽取新卡片；复习卡的升降档只看"短语本身用得对不对"（phraseOk 独立裁决），
     // 不被句子里其他知识点的错误污染——整题对错另行影响等级/连对
-    const cards = !isMCQ ? (grade.cards || []) : [];
+    const cards = !isMCQ ? (g.cards || []) : [];
     const usedReviewWord = q.reviewPhrase && normPhrase(inputRef.current).includes(normPhrase(q.reviewPhrase));
     onDone({
-      correct, tags, partialPass: !isMCQ && grade.pass && attempt === 2,
+      correct, tags, partialPass: !isMCQ && g.pass && attempt === 2,
       structKey: q.structKey, wrongEntry, cards,
-      reviewCardId: q.reviewCardId || null, reviewOk: !!(usedReviewWord && grade.phraseOk !== false),
+      reviewCardId: q.reviewCardId || null, reviewOk: !!(usedReviewWord && g.phraseOk !== false),
+      score: g.score != null ? g.score : (g.correct ? 100 : 0),
       retestId: q.retestId || null,
       line: q.line, kind: q.kind,
       qText: isBatch ? (q.items || []).map((it) => it.sentence).join(" | ") : (q.sentence || q.passage || q.chinese || ""),
@@ -1619,12 +1630,17 @@ function Profile({ state, onExit, onRetest, onDeleteCard }) {
           );
         })}
       </div>
-      {(state.placementHistory || []).length > 0 && (
+      {((state.placementHistory || []).length > 0 || (state.examHistory || []).length > 0) && (
         <div style={{ background: C.surface, borderRadius: 14, padding: 18, marginBottom: 14 }}>
-          <p style={{ ...mono, fontSize: 11, color: C.sub, margin: "0 0 8px" }}>BASELINE — 摸底历史（每 4 周重测，进步有据可查）</p>
+          <p style={{ ...mono, fontSize: 11, color: C.sub, margin: "0 0 8px" }}>BASELINE — 水平测试与摸底历史（每 4 周一次，进步有据可查）</p>
+          {(state.examHistory || []).map((h, i) => (
+            <p key={"e" + i} style={{ ...mono, fontSize: 12, color: C.ink, margin: "0 0 4px" }}>
+              📋 {h.date} · D {h.lines.decode.acc}%{h.lines.decode.wpm ? `/${h.lines.decode.wpm}wpm` : ""} · R {h.lines.register.acc}% · B {h.lines.build.acc}%{h.lines.build.wpm ? `/${h.lines.build.wpm}wpm` : ""}
+            </p>
+          ))}
           {(state.placementHistory || []).map((h, i) => (
-            <p key={i} style={{ ...mono, fontSize: 12, color: C.ink, margin: "0 0 4px" }}>
-              {h.date} · D{h.levels.decode} / R{h.levels.register} / B{h.levels.build}
+            <p key={"p" + i} style={{ ...mono, fontSize: 12, color: C.sub, margin: "0 0 4px" }}>
+              摸底 {h.date} · D{h.levels.decode} / R{h.levels.register} / B{h.levels.build}
             </p>
           ))}
           {(state.selfChecks || []).length > 0 && (
@@ -1649,6 +1665,116 @@ function Profile({ state, onExit, onRetest, onDeleteCard }) {
         <Btn kind="ghost" onClick={onExit}>← Back</Btn>
         <Btn kind="ghost" onClick={onRetest}>Retake placement (recalibrate)</Btn>
       </div>
+    </div>
+  );
+}
+
+/* ---------------- 考试模式：独立于日常训练的水平测量 ---------------- */
+// 素颜应试：无脚手架/无复习卡/无即时反馈；含迁移题（邮件体裁，测"没练过的格式"）；
+// 结果只写 examHistory，不影响等级/SRS/卡池——测量与训练严格分离
+function ExamMode({ state, setState, persist, onExit }) {
+  const [view, setView] = useState("intro"); // intro | run | report
+  const [idx, setIdx] = useState(0);
+  const [results, setResults] = useState([]);
+  const [qKey, setQKey] = useState(0);
+  // 12 题 = 三线交错 ×4 轮；第 4 轮解码为邮件体裁迁移题
+  const plan = [];
+  for (let r = 0; r < 4; r++) {
+    plan.push({ line: "decode", opts: { exam: true, genre: r === 3 ? "email" : undefined } });
+    plan.push({ line: "register", opts: { exam: true } });
+    plan.push({ line: "build", opts: { exam: true } });
+  }
+  const slot = plan[idx];
+
+  function handleDone(res) {
+    const nr = [...results, { line: res.line, correct: res.correct, score: res.score, timeUsed: res.timeUsed, timeLimit: res.timeLimit, wc: res.wc, wrong: res.wrongEntry || null }];
+    setResults(nr);
+    if (idx + 1 < plan.length) { setIdx(idx + 1); setQKey((k) => k + 1); return; }
+    // 交卷：生成成绩单并存档
+    const lines = {};
+    LINE_KEYS.forEach((l) => {
+      const rs = nr.filter((r) => r.line === l);
+      const okRs = rs.filter((r) => r.correct && r.wc && r.timeUsed >= 1);
+      lines[l] = {
+        lv: state.levels[l],
+        acc: rs.length ? Math.round((rs.filter((r) => r.correct).length / rs.length) * 100) : 0,
+        wpm: okRs.length ? Math.round(okRs.reduce((s, r) => s + (r.wc / r.timeUsed) * 60, 0) / okRs.length) : null,
+      };
+    });
+    const rec = { date: new Date().toISOString().slice(0, 10), lines };
+    const ns = { ...state, examHistory: [...(state.examHistory || []), rec] };
+    setState(ns); persist(ns);
+    setView("report");
+  }
+
+  if (view === "intro") return (
+    <div style={{ maxWidth: 620, margin: "0 auto" }}>
+      <p style={{ ...disp, fontWeight: 900, fontSize: 22, margin: "0 0 8px" }}>📋 水平测试</p>
+      <div style={{ background: C.surface, borderRadius: 14, padding: 18, marginBottom: 14 }}>
+        <p style={{ fontSize: 14, lineHeight: 1.7, color: C.ink, margin: 0 }}>
+          12 道题，约 15 分钟。和日常训练不同：<b>没有脚手架、没有复习题、做完才看结果</b>，还有一道你没练过的题型（读邮件抓要点）——测的是迁移，不是熟练。
+          成绩单会存档，和上次并排对比。这是回答"我到底有没有变强"的唯一可信仪器，别在疲劳时做。
+        </p>
+      </div>
+      <div style={{ display: "flex", gap: 10 }}>
+        <Btn onClick={() => setView("run")}>开始测试 →</Btn>
+        <Btn kind="ghost" onClick={onExit}>← Back</Btn>
+      </div>
+    </div>
+  );
+
+  if (view === "report") {
+    const hist = state.examHistory || [];
+    const cur = hist[hist.length - 1];
+    const prev = hist.length >= 2 ? hist[hist.length - 2] : null;
+    const wrongs = results.filter((r) => r.wrong);
+    return (
+      <div style={{ maxWidth: 620, margin: "0 auto" }}>
+        <p style={{ ...disp, fontWeight: 900, fontSize: 22, margin: "0 0 8px" }}>成绩单 · {cur.date}</p>
+        <div style={{ background: C.surface, borderRadius: 14, padding: 18, marginBottom: 14 }}>
+          {LINE_KEYS.map((l) => {
+            const c = cur.lines[l]; const p = prev ? prev.lines[l] : null;
+            const dAcc = p ? c.acc - p.acc : null;
+            const dWpm = p && p.wpm != null && c.wpm != null ? c.wpm - p.wpm : null;
+            return (
+              <div key={l} style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 10 }}>
+                <span style={{ ...disp, fontWeight: 700, fontSize: 15, minWidth: 78 }}>{LINES[l].name}</span>
+                <span style={{ ...mono, fontSize: 12, color: C.sub }}>L{c.lv}</span>
+                <span style={{ ...mono, fontSize: 14, fontWeight: 700, color: C.ink }}>{c.acc}%</span>
+                {dAcc != null && <span style={{ ...mono, fontSize: 11, color: dAcc > 0 ? C.good : dAcc < 0 ? C.bad : C.sub }}>{dAcc > 0 ? `↑${dAcc}` : dAcc < 0 ? `↓${-dAcc}` : "→"}</span>}
+                {c.wpm != null && <span style={{ ...mono, fontSize: 12, color: C.sub, marginLeft: "auto" }}>{c.wpm} wpm{dWpm != null ? (dWpm > 0 ? ` ↑${dWpm}` : dWpm < 0 ? ` ↓${-dWpm}` : "") : ""}</span>}
+              </div>
+            );
+          })}
+          {!prev && <p style={{ fontSize: 12, color: C.sub, margin: "6px 0 0" }}>这是你的第一份正式基线。4 周后再考一次，对比就有了。</p>}
+        </div>
+        {wrongs.length > 0 && (
+          <div style={{ background: C.surface, borderRadius: 14, padding: 18, marginBottom: 14 }}>
+            <p style={{ ...mono, fontSize: 11, color: C.sub, margin: "0 0 10px" }}>本次错题（{wrongs.length} 道，仅供复盘，不进错题本）</p>
+            {wrongs.map((r, i) => (
+              <div key={i} style={{ borderTop: `1px solid ${C.line}`, padding: "8px 0" }}>
+                <p style={{ margin: 0, fontSize: 13, color: C.ink, lineHeight: 1.5 }}>{r.wrong.question}</p>
+                <p style={{ margin: "2px 0 0", fontSize: 12, color: C.bad }}>你：{r.wrong.userAnswer}</p>
+                <p style={{ margin: "2px 0 0", fontSize: 12, color: C.good }}>参考：{r.wrong.reference}</p>
+              </div>
+            ))}
+          </div>
+        )}
+        <Btn onClick={onExit}>完成</Btn>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ maxWidth: 620, margin: "0 auto" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12, alignItems: "center" }}>
+        <p style={{ ...mono, fontSize: 12, color: C.sub, margin: 0 }}>EXAM · 反馈将在交卷后统一给出</p>
+        <button onClick={onExit} style={{ ...linkBtn, color: C.sub }}>放弃本次</button>
+      </div>
+      <QuestionLoader key={qKey} line={slot.line} level={state.levels[slot.line]} state={state} opts={slot.opts}
+        prefetchNext={idx + 1 < plan.length ? { line: plan[idx + 1].line, level: state.levels[plan[idx + 1].line], revengeTag: null, opts: plan[idx + 1].opts } : null}>
+        {(q) => <QuestionCard q={q} qNum={idx + 1} qTotal={plan.length} onDone={handleDone} silent />}
+      </QuestionLoader>
     </div>
   );
 }
@@ -1786,6 +1912,7 @@ export default function App() {
       {view === "review" && <FreePractice state={state} setState={setState} persist={persist} onExit={() => setView("home")} reviewMode />}
       {view === "materials" && <Materials state={state} setState={setState} persist={persist} onExit={() => setView("home")} />}
       {view === "toneguide" && <ToneGuide onExit={() => setView("home")} />}
+      {view === "exam" && <ExamMode state={state} setState={setState} persist={persist} onExit={() => setView("home")} />}
       {view === "profile" && <Profile state={state} onExit={() => setView("home")} onRetest={retest} onDeleteCard={deleteCard} />}
 
       {view === "home" && (
@@ -1813,6 +1940,7 @@ export default function App() {
               我的素材{((state.materials || {}).sentences || []).length ? ` (${state.materials.sentences.length})` : ""}
             </Btn>
             <Btn kind="ghost" onClick={() => setView("toneguide")}>语气速查</Btn>
+            <Btn kind="ghost" onClick={() => setView("exam")}>📋 水平测试{(state.examHistory || []).length === 0 ? "（建基线）" : ""}</Btn>
           </div>
           {(() => {
             const dc = (state.expressionBook || []).filter(isDue).length;
@@ -1843,15 +1971,17 @@ export default function App() {
             );
           })()}
           {(() => {
-            // 4 周重测提醒 + 每月判分审计提示
-            const hist = state.placementHistory || [];
-            const lastDate = hist.length ? hist[hist.length - 1].date : ((state.sessions || [])[0] || {}).date;
+            // 4 周考试提醒 + 每月判分审计提示
+            const exams = state.examHistory || [];
+            const lastDate = exams.length ? exams[exams.length - 1].date : ((state.sessions || [])[0] || {}).date;
             if (!lastDate) return null;
             const days = Math.floor((Date.now() - new Date(lastDate).getTime()) / (24 * 3600 * 1000));
-            if (days < 28) return null;
+            if (exams.length && days < 28) return null;
             return (
               <p style={{ fontSize: 12.5, color: C.sub, marginTop: 10 }}>
-                🔁 距上次摸底已 {days} 天——建议去 Profile 重测校准基线；顺便把导出的进度丢给 Claude 复核一轮判分质量。
+                {exams.length === 0
+                  ? "📋 你还没有正式基线——找个状态好的时候做一次「水平测试」，四周后的对比从它开始。"
+                  : `🔁 距上次水平测试已 ${days} 天——该考一次了；顺便把导出的进度丢给 Claude 复核一轮判分质量。`}
               </p>
             );
           })()}
