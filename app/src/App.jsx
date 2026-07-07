@@ -445,6 +445,7 @@ Grade it. Hints must point at problems WITHOUT giving the corrected words (coach
 If the scenario names a medium, grade against that medium's REAL conventions — slide bullet: concise, fragments acceptable; IM: brief and natural-professional; external email: complete formal sentences. The reference must be what a competent native professional would ACTUALLY write in that medium, not textbook prose. Do not penalize concision that fits the medium.
 FAITHFULNESS: the reference must preserve the original's factual content — never invent or upgrade facts the writer did not state (e.g. "some issues" must NOT become "critical bugs"), and never add NEW commitments, deadlines, or requests the draft does not contain (e.g. do NOT invent "by EOD" or "please confirm"). If adding a call-to-action or specifics would strengthen the message in real life, say so in the explanation as ADVICE ONLY — the reference itself stays faithful. Also: do not "correct" wording that is already idiomatic native usage in that medium.
 If the question gives the intended content as a Chinese point, grade ONLY how well the English expresses that point — never judge the position itself, and never penalize content that follows the given point.
+DISAGREEMENT MOVE: when the intent involves disagreeing, pushing back, or delivering an unwelcome view, check specifically whether the answer OPENS with an acknowledgment move ("I see your point…" / "That makes sense…" / "Fair point…") before the counter-position. If missing, add an issue tagged "register" with a hint pointing at the missing buffer opening. If present and natural, credit it in the explanation.
 TONE = INTENT MATCH: if an "intent" is given, the ONLY tone standard is whether the tone matches that intent. Hedging is a TOOL, not an error — when the intent is tentative (seeking input, soft disagreement), well-formed softeners (What if we... / One option could be... / I'm leaning toward X) are REQUIRED and stripping them is an error; when the intent is announcing a decision, tentative phrasing is the error. NEVER universally reward "more confident/direct". The reference must express the SAME intent with matched tone.
 PHRASE VERDICT: if the question has a requiredPhrase, include "phraseOk" in your JSON — true only if the learner used that phrase correctly and naturally. Judge this INDEPENDENTLY of all other errors: a sentence with a tense slip elsewhere but a perfect use of the required phrase gets phraseOk=true; a high-scoring sentence that used the phrase awkwardly gets phraseOk=false.
 CARDS: extract 0-2 reusable PHRASE-LEVEL upgrades worth memorizing (a set phrase, collocation, or pattern — NOT a whole sentence). For each: "weak" = what the learner wrote or a typical weak version, "better" = the natural professional phrase (≤5 words), "note" = a ≤8-word Chinese hint on when/how to use it. Only include genuinely reusable expressions; if the answer was already strong, return [].
@@ -666,8 +667,9 @@ function ParagraphAnatomy({ anatomy, formula }) {
 
 /* ---------------- Question Card ---------------- */
 function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
-  // 组句/接龙题两段式：读题不计时（真实会议里"想说什么"本就在脑子里，读中文要点是装置开销），开表后只压英语产出
-  const [phase, setPhase] = useState(() => (q.kind === "compose" || q.kind === "relay" ? "read" : "answer")); // read | answer | grading | coach | reveal | mcqdone
+  // 产出题两段式：读题不计时（消化场景/意图/内容是装置开销），开表后只压英语产出；
+  // 语气题的读题阶段专门用来"先想档位"——治"上手就翻译、忘了语气"
+  const [phase, setPhase] = useState(() => (q.kind === "compose" || q.kind === "relay" || q.kind === "rewrite" ? "read" : "answer")); // read | answer | grading | coach | reveal | mcqdone
   const [input, setInput] = useState("");
   const [picked, setPicked] = useState(null);
   const [picks, setPicks] = useState([null, null, null]); // judge3 三判
@@ -849,9 +851,15 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
       {/* READ PHASE: 读题消化不计时，开表后只压英语产出 */}
       {phase === "read" && (
         <div>
-          <p style={{ fontSize: 13, color: C.sub, lineHeight: 1.6, margin: "0 0 12px" }}>
-            先消化场景和你要表达的内容，在脑子里组织好思路——真实会议里，想说什么本来就在你心里，所以这一步不计时。倒计时只测一件事：把想法变成英语的速度。
-          </p>
+          {q.line === "register" ? (
+            <p style={{ fontSize: 13, color: "#7A3EF0", lineHeight: 1.6, margin: "0 0 12px", fontWeight: 600 }}>
+              ⚖️ 这是语气题，不是翻译题。先回答自己两个问题：①我的意图是什么档位（拍板/试探/反对…）？②如果是反对——缓冲开场准备好了吗（I see your point, but…）？想清楚再开表。
+            </p>
+          ) : (
+            <p style={{ fontSize: 13, color: C.sub, lineHeight: 1.6, margin: "0 0 12px" }}>
+              ⚡ 组句题：先消化场景和要表达的内容，在脑子里组织好思路——这一步不计时。倒计时只测一件事：把想法变成英语的速度。
+            </p>
+          )}
           <Btn onClick={() => setPhase("answer")}>想好了，开始作答 ⏱ {q.timeLimit}s</Btn>
         </div>
       )}
@@ -1509,7 +1517,9 @@ function Materials({ state, setState, persist, onExit }) {
 }
 
 /* ---------------- Profile ---------------- */
-function Profile({ state, onExit, onRetest, onDeleteCard }) {
+function Profile({ state, onExit, onRetest, onDeleteCard, onAddCard }) {
+  const [nb, setNb] = useState(""); const [nw, setNw] = useState(""); const [nn, setNn] = useState("");
+  const inp = { flex: 1, minWidth: 110, borderRadius: 8, border: `2px solid ${C.line}`, padding: "7px 10px", fontSize: 13, ...body, outline: "none" };
   const totalErr = Object.values(state.errorMap).reduce((a, b) => a + b, 0);
   const sorted = Object.entries(state.errorMap).sort((a, b) => b[1] - a[1]);
   const book = state.expressionBook || [];
@@ -1534,7 +1544,13 @@ function Profile({ state, onExit, onRetest, onDeleteCard }) {
         <p style={{ ...mono, fontSize: 11, color: C.sub, margin: "0 0 10px" }}>
           EXPRESSION CARDS 表达卡池 — {book.length} 张 · 已掌握 {masteredCount}
         </p>
-        {book.length === 0 && <p style={{ fontSize: 13, color: C.sub }}>还没有卡片。做组句/语域题时，遇到更地道的说法会自动存进来，再通过复习题反复练到掌握。</p>}
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
+          <input placeholder="要记的表达（必填）" value={nb} onChange={(e) => setNb(e.target.value)} style={inp} />
+          <input placeholder="你常犯的弱版本" value={nw} onChange={(e) => setNw(e.target.value)} style={inp} />
+          <input placeholder="备注（何时用）" value={nn} onChange={(e) => setNn(e.target.value)} style={inp} />
+          <Btn small disabled={!nb.trim()} onClick={() => { onAddCard && onAddCard(nw.trim(), nb.trim(), nn.trim()); setNb(""); setNw(""); setNn(""); }}>加卡</Btn>
+        </div>
+        {book.length === 0 && <p style={{ fontSize: 13, color: C.sub }}>还没有卡片。做组句/语域题时，遇到更地道的说法会自动存进来；你自己"总忘的表达"也可以在上面手动加，进入同一个复习循环。</p>}
         {[...book].sort((a, b) => (a.mastered - b.mastered) || (b.ts - a.ts)).map((c) => {
           const stt = cardStatus(c);
           return (
@@ -1861,6 +1877,10 @@ export default function App() {
     const ns = { ...state, expressionBook: (state.expressionBook || []).filter((c) => c.id !== id) };
     setState(ns); persist(ns);
   }
+  function addCard(weak, better, note) {
+    const ns = { ...state, expressionBook: mergeCards(state.expressionBook || [], [{ weak, better, note }], "manual") };
+    setState(ns); persist(ns);
+  }
 
   const weakest = weakestLine(state);
 
@@ -1913,7 +1933,7 @@ export default function App() {
       {view === "materials" && <Materials state={state} setState={setState} persist={persist} onExit={() => setView("home")} />}
       {view === "toneguide" && <ToneGuide onExit={() => setView("home")} />}
       {view === "exam" && <ExamMode state={state} setState={setState} persist={persist} onExit={() => setView("home")} />}
-      {view === "profile" && <Profile state={state} onExit={() => setView("home")} onRetest={retest} onDeleteCard={deleteCard} />}
+      {view === "profile" && <Profile state={state} onExit={() => setView("home")} onRetest={retest} onDeleteCard={deleteCard} onAddCard={addCard} />}
 
       {view === "home" && (
         <div style={{ maxWidth: 620, margin: "0 auto" }}>
