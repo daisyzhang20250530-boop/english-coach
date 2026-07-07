@@ -349,10 +349,10 @@ SELF-CHECK before returning: (1) does the answerIndex option commit any misreadi
     // 场景接龙（PRD 组句线题型3）：L2 起约 4 成概率出现，模拟"别人说一句、你接一句"的真实会议压力
     const useRelay = level >= 2 && Math.random() < 0.4;
     if (useRelay) {
-      spec = `Question type "relay": simulate a live meeting moment. A colleague or boss says ONE line in English directed at the learner (a question, a pushback, or a request for the learner's view). The learner must type a reply in English under time pressure.${multi ? " The situation should call for a multi-move reply (acknowledge → state position → propose next step)." : " The situation should call for a one-sentence reply."} Include who is speaking in the scenario. CRITICAL — separate content from language: the learner must never have to invent WHAT to say; give them their intended reply as a short Chinese point ("chinese" field) — a natural, defensible response (e.g. 不同意+理由+替代方案). The question tests only HOW to say it in English.`;
+      spec = `Question type "relay": simulate a live meeting moment. A colleague or boss says ONE line in English directed at the learner (a question, a pushback, or a request for the learner's view). The learner must type a reply in English under time pressure.${multi ? " The situation should call for a multi-move reply (acknowledge → state position → propose next step)." : " The situation should call for a ONE-SENTENCE reply, and the Chinese point MUST be short — at most ~40 Chinese characters, expressible as one natural English sentence. Never give a multi-move point at this level."} Include who is speaking in the scenario. CRITICAL — separate content from language: the learner must never have to invent WHAT to say; give them their intended reply as a short Chinese point ("chinese" field) — a natural, defensible response (e.g. 不同意+理由+替代方案). The question tests only HOW to say it in English.`;
       schema = `{"kind":"relay","sentence":"<the line spoken to the learner>","chinese":"<你要表达的意思，中文要点>","scenario":"...","note":"what a strong reply must accomplish (for grading)"}`;
     } else {
-      spec = `Question type "compose": a realistic meeting moment. Give the meaning to express in Chinese${multi ? " (three linked moves: raise an issue → suggest → ask for input)" : " (one sentence)"}${level === 1 ? ", plus a pattern hint like \"I'd suggest we...\"" : ""}${level === 3 ? ", and REQUIRE a given workplace pattern (e.g. \"My concern is...\", \"To build on that...\")" : ""}. Learner types the English under time pressure.`;
+      spec = `Question type "compose": a realistic meeting moment. Give the meaning to express in Chinese${multi ? " (three linked moves: raise an issue → suggest → ask for input)" : " (ONE sentence, at most ~40 Chinese characters)"}${level === 1 ? ", plus a pattern hint like \"I'd suggest we...\"" : ""}${level === 3 ? ", and REQUIRE a given workplace pattern (e.g. \"My concern is...\", \"To build on that...\")" : ""}. Learner types the English under time pressure.`;
       schema = `{"kind":"compose","chinese":"...","scenario":"...","patternHint":${level === 1 ? '"..."' : "null"},"requiredPhrase":${level === 3 ? '"..."' : "null"},"note":"what a strong answer includes (for grading)"}`;
     }
     }
@@ -627,7 +627,8 @@ function AnnotatedSentence({ sentence, core }) {
 
 /* ---------------- Question Card ---------------- */
 function QuestionCard({ q, onDone, qNum, qTotal }) {
-  const [phase, setPhase] = useState("answer"); // answer | grading | coach | reveal | mcqdone
+  // 组句/接龙题两段式：读题不计时（真实会议里"想说什么"本就在脑子里，读中文要点是装置开销），开表后只压英语产出
+  const [phase, setPhase] = useState(() => (q.kind === "compose" || q.kind === "relay" ? "read" : "answer")); // read | answer | grading | coach | reveal | mcqdone
   const [input, setInput] = useState("");
   const [picked, setPicked] = useState(null);
   const [picks, setPicks] = useState([null, null, null]); // judge3 三判
@@ -789,6 +790,16 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
       </div>
 
       <p style={{ ...disp, fontWeight: 700, fontSize: 14, margin: "0 0 10px", color: C.ink }}>{prompt}</p>
+
+      {/* READ PHASE: 读题消化不计时，开表后只压英语产出 */}
+      {phase === "read" && (
+        <div>
+          <p style={{ fontSize: 13, color: C.sub, lineHeight: 1.6, margin: "0 0 12px" }}>
+            先消化场景和你要表达的内容，在脑子里组织好思路——真实会议里，想说什么本来就在你心里，所以这一步不计时。倒计时只测一件事：把想法变成英语的速度。
+          </p>
+          <Btn onClick={() => setPhase("answer")}>想好了，开始作答 ⏱ {q.timeLimit}s</Btn>
+        </div>
+      )}
 
       {/* ANSWER PHASE */}
       {phase === "answer" && isBatch && (
