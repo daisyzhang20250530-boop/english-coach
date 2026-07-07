@@ -93,6 +93,9 @@ const DEFAULT_STATE = {
   wrongBook: [],       // 错题本：完整保存每道错题的题目、答案、问题、用时（最近100条）
   expressionBook: [],  // 表达卡池：{id, weak, better, note, line, seen, used, mastered, ts}
   materials: { sentences: [], topics: [] }, // 素材池：真实工作材料提取的难句与话题
+  speedLog: [],          // 流利度日志：每题 {t,line,ok,frac(用时/时限)}，自动化的金标准是"正确率不降、用时下降"
+  placementHistory: [],  // 摸底历史：每次摸底/重测的 {date,levels}，保住基线
+  selfChecks: [],        // 每周自评：{date,score 1-3}，系统内唯一刷不了的外部校标
 };
 
 /* ---------------- 云同步（GitHub Gist 作为进度存储）---------------- */
@@ -126,14 +129,24 @@ async function cloudPull() {
   const f = g.files && g.files[GIST_FILE];
   if (!f) return null;
   const content = f.truncated ? await (await fetch(f.raw_url)).text() : f.content; // 大文件被截断时拉原始地址
+  _syncMark(true);
   return JSON.parse(content);
+}
+// 同步状态打点：失败不能静默——首页要能看到"上次同步时间/失败警告"
+function _syncMark(ok) {
+  try {
+    if (ok) { localStorage.setItem("wec_last_sync", String(Date.now())); localStorage.removeItem("wec_sync_err"); }
+    else localStorage.setItem("wec_sync_err", "1");
+  } catch (e) {}
 }
 let _pushTimer = null;
 function cloudPushDebounced(state) {
   if (!getGhToken() || !getGistId()) return;
   clearTimeout(_pushTimer);
   _pushTimer = setTimeout(() => { // 合并 2.5 秒内的连续保存，避免每题一次请求
-    ghApi("/gists/" + getGistId(), "PATCH", { files: { [GIST_FILE]: { content: JSON.stringify(state) } } }).catch(() => {});
+    ghApi("/gists/" + getGistId(), "PATCH", { files: { [GIST_FILE]: { content: JSON.stringify(state) } } })
+      .then(() => _syncMark(true))
+      .catch(() => _syncMark(false));
   }, 2500);
 }
 
@@ -328,7 +341,7 @@ SELF-CHECK before returning: (1) does the answerIndex option commit any misreadi
   } else {
     const multi = level >= 4;
     // 卡池复习：复习入口必给卡；日常 session 只在有"到期"卡时以 35% 概率插入（SRS 不到期不打扰）
-    reviewCard = opts.forceReview ? pickReviewCard(state) : (Math.random() < 0.35 ? pickReviewCard(state, { dueOnly: true }) : null);
+    reviewCard = opts.forceReview ? pickReviewCard(state) : (Math.random() < 0.6 ? pickReviewCard(state, { dueOnly: true }) : null); // 混编后组句题变少，提高到期卡插队概率
     if (reviewCard) {
       spec = `Question type "compose" (PHRASE REVIEW). Give a realistic meeting moment as a Chinese point to express, with a scenario. The learner MUST use the phrase "${reviewCard.better}" naturally in their English answer. Pick a fresh situation where this phrase fits well.`;
       schema = `{"kind":"compose","chinese":"...","scenario":"...","patternHint":null,"requiredPhrase":"${reviewCard.better}","note":"a strong answer uses the required phrase naturally"}`;
@@ -471,6 +484,10 @@ function applyResult(state, line, res) {
     s.wrongBook = (s.wrongBook || []).map((w) => w.id === retestId ? { ...w, srs: correct ? srsAdvance(w.srs) : srsReset() } : w);
   }
   if (wrongEntry) s.wrongBook = [...(s.wrongBook || []), wrongEntry].slice(-100);
+  // 流利度日志：限时题全量记录（对错都记），自动化的证据在这条曲线里
+  if (res.timeLimit > 0 && res.timeUsed != null) {
+    s.speedLog = [...(s.speedLog || []), { t: Date.now(), line, ok: !!correct, frac: Math.round((res.timeUsed / res.timeLimit) * 100) / 100 }].slice(-300);
+  }
   const st = { ...s.streaks[line] };
   if (correct) { st.c += 1; st.w = 0; } else { st.w += 1; st.c = 0; }
   let leveled = 0;
@@ -709,6 +726,8 @@ function QuestionCard({ q, onDone, qNum, qTotal }) {
       line: q.line,
       qText: isBatch ? (q.items || []).map((it) => it.sentence).join(" | ") : (q.sentence || q.passage || q.chinese || ""),
       materialId: q.materialId,
+      timeUsed: q.timeLimit > 0 ? q.timeLimit - left : null, // 答对的也记时——流利度=正确率不降、用时下降
+      timeLimit: q.timeLimit > 0 ? q.timeLimit : null,
     });
   }
 
@@ -982,11 +1001,13 @@ function Session({ state, setState, persist, onExit }) {
   const startLevels = useRef(null);
   const Q_PER_BLOCK = 6;
 
-  const blocks = duration ? buildBlocks(duration, state) : [];
-  function buildBlocks(mins, st) {
-    const n = mins / 15;
-    const order = [...LINE_KEYS].sort((a, b) => st.levels[a] - st.levels[b]);
-    return Array.from({ length: n }, (_, i) => order[i % 3]);
+  const nBlocks = duration ? duration / 15 : 0;
+  const planRef = useRef(null);
+  // 块内三线混编：弱线3题、中线2题、强线1题，交错排列（interleaving）。
+  // 修复盲区：此前 15 分钟=只练最弱线，其他两线和卡池复习长期饿死
+  function blockPlan(st) {
+    const o = [...LINE_KEYS].sort((a, b) => st.levels[a] - st.levels[b]);
+    return [o[0], o[1], o[2], o[0], o[1], o[0]];
   }
 
   useEffect(() => {
@@ -998,11 +1019,12 @@ function Session({ state, setState, persist, onExit }) {
 
   function start(mins) {
     startLevels.current = { ...state.levels };
+    planRef.current = blockPlan(state); // 块开始时冻结本块出题计划，避免中途等级变化打乱当前块
     setDuration(mins); setView("run");
   }
 
   function handleQDone(res) {
-    const line = blocks[blockIdx];
+    const line = res.line;
     const { state: ns } = applyResult(state, line, res);
     ns.lastTexts = [...(state.lastTexts || []), res.qText].filter(Boolean).slice(-8); // 修复：题目原文写入防重复名单
     setState(ns); persist(ns);
@@ -1013,12 +1035,12 @@ function Session({ state, setState, persist, onExit }) {
     // block done
     const blockRes = newResults.filter((r) => r.block === blockIdx);
     const acc = blockRes.filter((r) => r.correct).length / blockRes.length;
-    if (blockIdx + 1 >= blocks.length) { finishSession(newResults, ns); return; }
+    if (blockIdx + 1 >= nBlocks) { finishSession(newResults, ns); return; }
     if (blockIdx + 1 >= 2 && acc < 0.5) { setView("fatigue"); return; }
     setBreakLeft(120); setView("break");
   }
 
-  function nextBlock() { setBlockIdx(blockIdx + 1); setQIdx(0); setQKey((k) => k + 1); setView("run"); }
+  function nextBlock() { planRef.current = blockPlan(state); setBlockIdx(blockIdx + 1); setQIdx(0); setQKey((k) => k + 1); setView("run"); }
 
   function finishSession(allResults, ns) {
     const correct = allResults.filter((r) => r.correct).length;
@@ -1050,17 +1072,19 @@ function Session({ state, setState, persist, onExit }) {
     }
     return { revengeTag: state.recentWrong.length ? state.recentWrong[state.recentWrong.length - 1].tag : null, opts: undefined };
   };
-  const cur = slotParams(qIdx, blocks[blockIdx]);
+  const plan = planRef.current || (duration ? blockPlan(state) : []);
+  const qLine = plan[qIdx] || weakestLine(state);
+  const cur = slotParams(qIdx, qLine);
 
-  // 预取参数预测：块内下一题（同线），或下一块第一题；升降级/复仇位不符时缓存 key 对不上会自动废弃重生成
+  // 预取参数预测：块内下一题（按混编计划），或下一块第一题；升降级/复仇位不符时缓存 key 对不上会自动废弃重生成
   const prefetchNext = (() => {
     if (qIdx + 1 < Q_PER_BLOCK) {
-      const ln = blocks[blockIdx];
+      const ln = plan[qIdx + 1] || qLine;
       const nxt = slotParams(qIdx + 1, ln);
       return { line: ln, level: state.levels[ln], revengeTag: nxt.revengeTag, opts: nxt.opts };
     }
-    if (blockIdx + 1 < blocks.length) {
-      const ln = blocks[blockIdx + 1];
+    if (blockIdx + 1 < nBlocks) {
+      const ln = blockPlan(state)[0];
       return { line: ln, level: state.levels[ln], revengeTag: null };
     }
     return null;
@@ -1087,7 +1111,7 @@ function Session({ state, setState, persist, onExit }) {
   if (view === "break") return (
     <Center>
       <p style={{ ...disp, fontWeight: 900, fontSize: 26, margin: 0 }}>Block {blockIdx + 1} done — step away.</p>
-      <p style={{ color: C.sub, margin: "8px 0 18px" }}>Look out a window, stretch, get water. Next block: <b>{LINES[blocks[blockIdx + 1]].name}</b>.</p>
+      <p style={{ color: C.sub, margin: "8px 0 18px" }}>Look out a window, stretch, get water. Next block: <b>a fresh mix</b> — your weakest line gets the most reps.</p>
       <p style={{ ...disp, fontWeight: 900, fontSize: 48, color: breakLeft > 0 ? C.accent : C.good, margin: "0 0 18px" }}>
         {Math.floor(breakLeft / 60)}:{String(breakLeft % 60).padStart(2, "0")}
       </p>
@@ -1130,10 +1154,10 @@ function Session({ state, setState, persist, onExit }) {
   return (
     <div style={{ maxWidth: 620, margin: "0 auto" }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12, alignItems: "center" }}>
-        <p style={{ ...mono, fontSize: 12, color: C.sub, margin: 0 }}>BLOCK {blockIdx + 1}/{blocks.length} · {LINES[blocks[blockIdx]].name.toUpperCase()}</p>
+        <p style={{ ...mono, fontSize: 12, color: C.sub, margin: 0 }}>BLOCK {blockIdx + 1}/{nBlocks} · MIXED · now: {LINES[qLine].name.toUpperCase()}</p>
         <button onClick={onExit} style={{ ...linkBtn, color: C.sub }}>Exit</button>
       </div>
-      <QuestionLoader key={qKey} line={blocks[blockIdx]} level={state.levels[blocks[blockIdx]]} state={state} revengeTag={cur.revengeTag} opts={cur.opts} prefetchNext={prefetchNext}>
+      <QuestionLoader key={qKey} line={qLine} level={state.levels[qLine]} state={state} revengeTag={cur.revengeTag} opts={cur.opts} prefetchNext={prefetchNext}>
         {(q) => <QuestionCard q={q} qNum={qIdx + 1} qTotal={Q_PER_BLOCK} onDone={handleQDone} />}
       </QuestionLoader>
     </div>
@@ -1158,7 +1182,9 @@ function FreePractice({ state, setState, persist, onExit, reviewMode }) {
   const [count, setCount] = useState(0);
   const [correctCount, setCorrectCount] = useState(0);
   const [warn, setWarn] = useState(false);
+  const [capHit, setCapHit] = useState(false); // 每日复习额度：防 SRS 积压压垮（死亡螺旋）
   const [qKey, setQKey] = useState(0);
+  const REVIEW_CAP = 8;
 
   function handleDone(res) {
     const ln = res.line || line;
@@ -1167,6 +1193,7 @@ function FreePractice({ state, setState, persist, onExit, reviewMode }) {
     setState(ns); persist(ns);
     const c = count + 1, cc = correctCount + (res.correct ? 1 : 0);
     setCount(c); setCorrectCount(cc);
+    if (reviewMode && c === REVIEW_CAP) { setCapHit(true); return; }
     if (c % 10 === 0 && cc / c < 0.5) { setWarn(true); return; }
     setQKey((k) => k + 1);
   }
@@ -1195,6 +1222,17 @@ function FreePractice({ state, setState, persist, onExit, reviewMode }) {
       </div>
       <div style={{ marginTop: 16 }}><Btn kind="ghost" onClick={onExit}>← Back</Btn></div>
     </div>
+  );
+
+  if (capHit) return (
+    <Center>
+      <p style={{ ...disp, fontWeight: 900, fontSize: 24 }}>今日复习额度已完成 ✅</p>
+      <p style={{ color: C.sub, maxWidth: 420, margin: "8px auto 18px" }}>间隔复习贵在每天少量，不在一次清空。没做完的会自动顺延，明天优先出现——积压不是债务，是排队。</p>
+      <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+        <Btn kind="good" onClick={onExit}>今天到这（推荐）</Btn>
+        <Btn kind="ghost" onClick={() => { setCapHit(false); setQKey((k) => k + 1); }}>再来几个</Btn>
+      </div>
+    </Center>
   );
 
   if (warn) return (
@@ -1482,6 +1520,43 @@ function Profile({ state, onExit, onRetest, onDeleteCard }) {
           </div>
         ))}
       </div>
+      <div style={{ background: C.surface, borderRadius: 14, padding: 18, marginBottom: 14 }}>
+        <p style={{ ...mono, fontSize: 11, color: C.sub, margin: "0 0 10px" }}>FLUENCY 流利度 — 自动化的证据：正确率不降、用时占比下降</p>
+        {LINE_KEYS.map((l) => {
+          const logs = (state.speedLog || []).filter((e) => e.line === l && e.ok);
+          if (logs.length < 6) return <p key={l} style={{ fontSize: 12, color: C.sub, margin: "0 0 6px" }}>{LINES[l].name}：样本不足（答对的限时题 ≥6 道后显示）</p>;
+          const recent = logs.slice(-15), prev = logs.slice(-30, -15);
+          const avg = (a) => Math.round((a.reduce((s, e) => s + e.frac, 0) / a.length) * 100);
+          const r = avg(recent), p = prev.length >= 6 ? avg(prev) : null;
+          const delta = p != null ? r - p : null;
+          return (
+            <div key={l} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 7 }}>
+              <span style={{ fontSize: 12, minWidth: 70, color: C.ink }}>{LINES[l].name}</span>
+              <div style={{ flex: 1, height: 8, background: C.bg, borderRadius: 4 }}>
+                <div style={{ width: `${Math.min(100, r)}%`, height: "100%", background: LINES[l].color, borderRadius: 4, opacity: 0.7 }} />
+              </div>
+              <span style={{ ...mono, fontSize: 11, minWidth: 110, textAlign: "right", color: delta == null ? C.sub : delta < 0 ? C.good : delta > 0 ? C.amber : C.sub }}>
+                答对均用 {r}% 时限{delta != null ? (delta < 0 ? ` ↓${-delta}` : delta > 0 ? ` ↑${delta}` : " →") : ""}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {(state.placementHistory || []).length > 0 && (
+        <div style={{ background: C.surface, borderRadius: 14, padding: 18, marginBottom: 14 }}>
+          <p style={{ ...mono, fontSize: 11, color: C.sub, margin: "0 0 8px" }}>BASELINE — 摸底历史（每 4 周重测，进步有据可查）</p>
+          {(state.placementHistory || []).map((h, i) => (
+            <p key={i} style={{ ...mono, fontSize: 12, color: C.ink, margin: "0 0 4px" }}>
+              {h.date} · D{h.levels.decode} / R{h.levels.register} / B{h.levels.build}
+            </p>
+          ))}
+          {(state.selfChecks || []).length > 0 && (
+            <p style={{ fontSize: 12, color: C.sub, margin: "8px 0 0" }}>
+              每周体感：{(state.selfChecks || []).slice(-8).map((c) => ["", "😣", "😐", "😊"][c.score]).join(" ")}
+            </p>
+          )}
+        </div>
+      )}
       <div style={{ background: C.surface, borderRadius: 14, padding: 18, marginBottom: 16 }}>
         <p style={{ ...mono, fontSize: 11, color: C.sub, margin: "0 0 8px" }}>SESSIONS — {state.sessions.length} completed</p>
         <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
@@ -1566,8 +1641,14 @@ export default function App() {
   );
 
   function placementDone(levels) {
-    const ns = { ...state, placementDone: true, levels: { ...levels } };
+    // 基线入史册：每次摸底/重测的结果永久保存，"我比一个月前强了吗"从此有据可查
+    const rec = { date: new Date().toISOString().slice(0, 10), levels: { ...levels } };
+    const ns = { ...state, placementDone: true, levels: { ...levels }, placementHistory: [...(state.placementHistory || []), rec] };
     setState(ns); persist(ns); setView("home");
+  }
+  function saveSelfCheck(score) {
+    const ns = { ...state, selfChecks: [...(state.selfChecks || []), { date: new Date().toISOString().slice(0, 10), score }] };
+    setState(ns); persist(ns);
   }
   function retest() {
     const ns = { ...state, placementDone: false };
@@ -1659,11 +1740,54 @@ export default function App() {
           {(() => {
             const dc = (state.expressionBook || []).filter(isDue).length;
             const dw = (state.wrongBook || []).filter((w) => w.id && isDue(w)).length;
-            return (dc + dw) > 0 ? (
+            const total = dc + dw;
+            if (total === 0) return null;
+            const today = Math.min(total, 8); // 每日消化上限，其余顺延——积压是排队不是债务
+            return (
               <p style={{ fontSize: 13, color: C.amber, marginTop: 14, fontWeight: 600 }}>
-                📅 今日到期：{dc > 0 ? `表达卡 ${dc} 张` : ""}{dc > 0 && dw > 0 ? " · " : ""}{dw > 0 ? `错题重考 ${dw} 道` : ""}（做 session 或点复习卡池即可消化）
+                📅 今日安排复习 {today} 项{total > today ? `（另有 ${total - today} 项自动顺延，不用着急）` : ""}——做 session 或点复习卡池即可消化
               </p>
-            ) : null;
+            );
+          })()}
+          {(() => {
+            // 每周自评：系统内唯一刷不了的指标——真实工作里的体感
+            const last = (state.selfChecks || []).slice(-1)[0];
+            const daysSince = last ? (Date.now() - new Date(last.date).getTime()) / (24 * 3600 * 1000) : 99;
+            if ((state.sessions || []).length === 0 || daysSince < 7) return null;
+            return (
+              <div style={{ background: C.surface, borderRadius: 12, padding: 14, marginTop: 14 }}>
+                <p style={{ fontSize: 13, color: C.ink, margin: "0 0 8px", fontWeight: 600 }}>📊 每周一问：这周在工作里读/写英文的体感？</p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  {[["更吃力", 1], ["没变化", 2], ["更顺了", 3]].map(([label, v]) => (
+                    <button key={v} onClick={() => saveSelfCheck(v)} style={{ flex: 1, padding: "8px 6px", borderRadius: 8, cursor: "pointer", fontSize: 13, ...body, border: `2px solid ${C.line}`, background: "#fff", color: C.ink }}>{label}</button>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+          {(() => {
+            // 4 周重测提醒 + 每月判分审计提示
+            const hist = state.placementHistory || [];
+            const lastDate = hist.length ? hist[hist.length - 1].date : ((state.sessions || [])[0] || {}).date;
+            if (!lastDate) return null;
+            const days = Math.floor((Date.now() - new Date(lastDate).getTime()) / (24 * 3600 * 1000));
+            if (days < 28) return null;
+            return (
+              <p style={{ fontSize: 12.5, color: C.sub, marginTop: 10 }}>
+                🔁 距上次摸底已 {days} 天——建议去 Profile 重测校准基线；顺便把导出的进度丢给 Claude 复核一轮判分质量。
+              </p>
+            );
+          })()}
+          {getGhToken() && (() => {
+            // 同步不再静默：显示上次同步时间，失败变红
+            let lastSync = 0, err = false;
+            try { lastSync = parseInt(localStorage.getItem("wec_last_sync") || "0", 10); err = !!localStorage.getItem("wec_sync_err"); } catch (e) {}
+            const mins = lastSync ? Math.floor((Date.now() - lastSync) / 60000) : null;
+            return (
+              <p style={{ ...mono, fontSize: 11, color: err ? C.bad : C.sub, marginTop: 10 }}>
+                {err ? "⚠️ 云同步失败——检查网络或令牌是否失效" : mins == null ? "云同步已开启，等待首次同步" : `云同步正常 · 上次 ${mins < 1 ? "刚刚" : mins + " 分钟前"}`}
+              </p>
+            );
           })()}
           {state.sessions.length > 0 && (
             <p style={{ ...mono, fontSize: 11, color: C.sub, marginTop: 6 }}>
