@@ -825,8 +825,18 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
     : q.kind === "relay" ? "They're waiting — type your reply:"
     : "Say it in English:";
 
+  const BANNER = {
+    decode: ["🔍", "解码题", "读懂它 — 抓主干 / 抓主旨"],
+    register: ["⚖️", "语气题", "匹配意图 ≠ 翻译"],
+    build: ["⚡", "组句题", "限时把意思说成英语"],
+  }[q.line] || ["", "", ""];
   return (
-    <div style={{ background: C.surface, borderRadius: 16, padding: 22, boxShadow: "0 1px 4px rgba(16,29,51,.06)" }}>
+    <div style={{ background: C.surface, borderRadius: 16, padding: 22, boxShadow: "0 1px 4px rgba(16,29,51,.06)", borderTop: `5px solid ${LINES[q.line].color}` }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, margin: "-8px -8px 12px", padding: "9px 14px", borderRadius: 10, background: LINES[q.line].color + "14" }}>
+        <span style={{ fontSize: 16 }}>{BANNER[0]}</span>
+        <span style={{ ...disp, fontWeight: 900, fontSize: 16, color: LINES[q.line].color, letterSpacing: 0.5 }}>{BANNER[1]}</span>
+        <span style={{ fontSize: 12.5, color: C.sub }}>{BANNER[2]}</span>
+      </div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <Tag tone="accent">{LINES[q.line].name} · L{q.level}</Tag>
