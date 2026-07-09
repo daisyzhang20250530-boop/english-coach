@@ -721,7 +721,7 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
     submittedRef.current = true;
     if (auto) timedOutRef.current = true;
     if (isBatch) {
-      const per = (q.items || []).map((it, i) => picks[i] === it.answerIndex);
+      const per = (q.items || []).map((it, i) => picks[i] === Number(it.answerIndex)); // 防模型把序号返回成字符串
       const g = { correct: per.every(Boolean), per }; // 全对才算对——连对2题=连续判对6句，L1毕业证据更扎实
       setGrade(g);
       if (silent) { finish(g); return; } // 考试模式：不显示反馈，直接交卷
