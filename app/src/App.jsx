@@ -528,7 +528,9 @@ function applyResult(state, line, res) {
     }].slice(-300);
   }
   const st = { ...s.streaks[line] };
-  if (correct) { st.c += 1; st.w = 0; } else { st.w += 1; st.c = 0; }
+  if (correct) { st.c += (res.kind === "judge3" ? 2 : 1); st.w = 0; } // 三判全对=连续3个正确判断，证据等价连对2题→一次全对即可升级，L1只是闸机不是居住地
+  else if (res.kind === "judge3" && res.nearMiss) { /* 2/3 属边界噪声（语气判断本身主观），中性处理：不奖不罚，错句仍进错题本 */ }
+  else { st.w += 1; st.c = 0; }
   let leveled = 0;
   if (st.c >= 2 && s.levels[line] < 5) { s.levels[line] += 1; st.c = 0; leveled = 1; }
   if (st.w >= 2 && s.levels[line] > 1) { s.levels[line] -= 1; st.w = 0; leveled = -1; }
@@ -801,6 +803,7 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
       reviewCardId: q.reviewCardId || null, reviewOk: !!(usedReviewWord && g.phraseOk !== false),
       score: g.score != null ? g.score : (g.correct ? 100 : 0),
       retestId: q.retestId || null,
+      nearMiss: isBatch ? (g.per || []).filter(Boolean).length === 2 : false, // 三判 2/3：边界噪声，等级中性
       moves: Array.isArray(g.moves) ? g.moves : null, intentKey: q.intentKey || null, // 话步检查结果
       line: q.line, kind: q.kind,
       qText: isBatch ? (q.items || []).map((it) => it.sentence).join(" | ") : (q.sentence || q.passage || q.chinese || ""),
