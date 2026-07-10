@@ -449,10 +449,16 @@ function genQuestionCached(line, level, state, revengeTag, opts = {}) {
   return genQuestion(line, level, state, revengeTag, opts);
 }
 
-async function gradeAnswer(q, answer) {
+// 语音识别（口语题用）：浏览器原生 Web Speech API，Chrome/Edge 支持
+const STT = typeof window !== "undefined" ? (window.SpeechRecognition || window.webkitSpeechRecognition) : null;
+const sttSupported = !!STT;
+
+async function gradeAnswer(q, answer, spoken) {
   const prompt = `You are a deliberate-practice English coach. ${LEARNER}
 Question (${q.line} line, level ${q.level}, type ${q.kind}): ${JSON.stringify({ sentence: q.sentence, passage: q.passage, chinese: q.chinese, intent: q.intent, scenario: q.scenario, requiredPhrase: q.requiredPhrase, note: q.note })}
 Learner's answer: """${answer || "(empty — time ran out)"}"""
+${spoken ? `SPOKEN ANSWER: this is a speech-to-text transcript of the learner SPEAKING, not writing. Grade it as SPEECH: (1) ignore all punctuation, capitalization, and transcription artifacts — the transcript has none; (2) ignore natural spoken disfluencies (um, uh, false starts, self-corrections, minor run-ons) — these are normal in speech, never penalize them; (3) if a word looks like a plausible speech-to-text mishearing of a correct word, do NOT count it as the learner's error; (4) judge what matters in SPOKEN business English: did they convey the meaning, is the register/intent right, are the discourse moves present, and does it flow naturally enough to say in a real meeting. The reference should be what you'd naturally SAY (spoken register), not a written sentence.
+` : ""}
 Grade it. Hints must point at problems WITHOUT giving the corrected words (coach, don't feed answers). Tags must come from: ${ERROR_TAGS.join(", ")} ("structure-misread" is ONLY for decode/reading questions, never for writing).
 If the scenario names a medium, grade against that medium's REAL conventions — slide bullet: concise, fragments acceptable; IM: brief and natural-professional; external email: complete formal sentences. The reference must be what a competent native professional would ACTUALLY write in that medium, not textbook prose. Do not penalize concision that fits the medium.
 FAITHFULNESS: the reference must preserve the original's factual content — never invent or upgrade facts the writer did not state (e.g. "some issues" must NOT become "critical bugs"), and never add NEW commitments, deadlines, or requests the draft does not contain (e.g. do NOT invent "by EOD" or "please confirm"). If adding a call-to-action or specifics would strengthen the message in real life, say so in the explanation as ADVICE ONLY — the reference itself stays faithful. Also: do not "correct" wording that is already idiomatic native usage in that medium.
@@ -701,8 +707,34 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
   const [grade, setGrade] = useState(null);
   const [left, setLeft] = useState(q.timeLimit);
   const [attempt, setAttempt] = useState(1);
+  const [recording, setRecording] = useState(false);
+  const spokenRef = useRef(false); // 本题答案是否为口语（决定判分标准）
+  const recRef = useRef(null);
   const submittedRef = useRef(false);
   const timedOutRef = useRef(false);
+  // 口语题：组句线支持"说"（会议表达就该练口头产出，不是打字）
+  const canSpeak = sttSupported && q.line === "build";
+  function startSpeaking() {
+    if (!STT || recording) return;
+    const rec = new STT();
+    rec.lang = "en-US"; rec.interimResults = true; rec.maxAlternatives = 1; rec.continuous = true;
+    let finalTxt = "";
+    rec.onresult = (ev) => {
+      let interim = "";
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const t = ev.results[i][0].transcript;
+        if (ev.results[i].isFinal) finalTxt += t + " "; else interim += t;
+      }
+      setInput((finalTxt + interim).trim());
+    };
+    rec.onerror = () => setRecording(false);
+    rec.onend = () => setRecording(false);
+    recRef.current = rec;
+    spokenRef.current = true;
+    setInput(""); setRecording(true);
+    try { rec.start(); } catch (e) { setRecording(false); }
+  }
+  function stopSpeaking() { try { recRef.current && recRef.current.stop(); } catch (e) {} setRecording(false); }
   const inputRef = useRef("");
   inputRef.current = input;
 
@@ -712,6 +744,8 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
     const t = setTimeout(() => setLeft((x) => x - 1), 1000);
     return () => clearTimeout(t);
   }, [left, phase]); // eslint-disable-line
+
+  useEffect(() => () => { try { recRef.current && recRef.current.abort(); } catch (e) {} }, []); // 卸载时中止识别，防止悬挂
 
   const isMCQ = q.kind === "trunk" || q.kind === "judge";
   const isBatch = q.kind === "judge3";
@@ -736,9 +770,10 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
       setPhase("mcqdone");
       return;
     }
+    if (recording) stopSpeaking();
     setPhase("grading");
     try {
-      const g = await gradeAnswer(q, inputRef.current);
+      const g = await gradeAnswer(q, inputRef.current, spokenRef.current);
       setGrade(g);
       if (silent) { finish(g); return; }
       setPhase(g.pass ? "reveal" : "coach");
@@ -753,7 +788,7 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
   async function handleRetry() {
     setPhase("grading");
     try {
-      const g = await gradeAnswer(q, inputRef.current);
+      const g = await gradeAnswer(q, inputRef.current, spokenRef.current);
       setGrade(g);
       setPhase("reveal");
       setAttempt(2);
@@ -940,9 +975,20 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
       )}
       {phase === "answer" && !isMCQ && (
         <div>
-          <textarea value={input} onChange={(e) => setInput(e.target.value)} rows={3} autoFocus
-            placeholder="Type here — the clock is running…"
-            style={{ width: "100%", boxSizing: "border-box", borderRadius: 10, border: `2px solid ${C.line}`, padding: 12, fontSize: 15, ...body, resize: "vertical", outline: "none" }} />
+          {canSpeak && (
+            <div style={{ marginBottom: 10, padding: 12, background: recording ? "#FBE9E9" : C.accentSoft, borderRadius: 10, textAlign: "center" }}>
+              <p style={{ margin: "0 0 8px", fontSize: 12.5, color: C.sub }}>
+                {recording ? "🔴 正在听…说完点停止（会议里就是要开口，不是打字）" : "会议表达要练"}<b style={{ color: C.ink }}>{recording ? "" : "开口说"}</b>{recording ? "" : "——点下面按住这句话说出来"}
+              </p>
+              {!recording
+                ? <Btn onClick={startSpeaking}>🎤 开口说</Btn>
+                : <Btn kind="danger" onClick={stopSpeaking}>⏹ 说完了</Btn>}
+            </div>
+          )}
+          <textarea value={input} onChange={(e) => { setInput(e.target.value); spokenRef.current = false; }} rows={3} autoFocus={!canSpeak}
+            placeholder={canSpeak ? "开口说，或在这里打字…" : "Type here — the clock is running…"}
+            style={{ width: "100%", boxSizing: "border-box", borderRadius: 10, border: `2px solid ${recording ? C.bad : C.line}`, padding: 12, fontSize: 15, ...body, resize: "vertical", outline: "none" }} />
+          {canSpeak && input && spokenRef.current && <p style={{ ...mono, fontSize: 11, color: C.sub, margin: "6px 0 0" }}>↑ 识别到的内容，可手动改后再提交</p>}
           <div style={{ marginTop: 10 }}><Btn onClick={() => handleSubmit()} disabled={!input.trim()}>Submit</Btn></div>
         </div>
       )}
