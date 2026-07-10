@@ -215,6 +215,37 @@ async function saveState(s) {
   try { await window.storage.set(KEY, JSON.stringify(s)); } catch (e) { console.error("save failed", e); }
 }
 
+// 一次性数据修复（2026-07-10）：07-07 上线的版本把点击事件误当判分结果，之后所有题不论对错都被记错。
+// 可证伪的假错题：答案与参考完全一致（选择/三判答对了仍进错题本），或开放题参考为空且无任何 issue（判分结果被丢掉了）。
+// 修复：删假错题、清连错计数、把等级恢复到 bug 期间的最高起点（那之后的降级全部基于坏测量）。幂等，跑一次后打标记。
+function repairEventBugData(s) {
+  if (s.fixedEventBug || !(s.wrongBook || []).length) return s;
+  const isFake = (w) =>
+    (w.userAnswer && w.reference && w.userAnswer === w.reference) ||
+    ((!w.issues || w.issues.length === 0) && (w.reference === "" || w.reference === "—") && !w.timedOut);
+  const fakes = s.wrongBook.filter(isFake);
+  if (!fakes.length) return { ...s, fixedEventBug: true };
+  const ns = { ...s, fixedEventBug: true };
+  ns.wrongBook = s.wrongBook.filter((w) => !isFake(w));
+  ns.streaks = { decode: { c: 0, w: 0 }, register: { c: 0, w: 0 }, build: { c: 0, w: 0 } };
+  ns.recentWrong = [];
+  // 假的三判错题每条给 errorMap.register 记了一次账，退回去
+  const fakeJudge3 = fakes.filter((w) => w.kind === "judge3").length;
+  if (fakeJudge3 && ns.errorMap && ns.errorMap.register) {
+    ns.errorMap = { ...ns.errorMap, register: Math.max(0, ns.errorMap.register - fakeJudge3) };
+  }
+  // 等级恢复：bug 窗口内（首条假错题日期起）各 session 起点的最大值 = 最后一次可信的测量
+  const firstFakeDate = fakes.map((w) => w.date).sort()[0];
+  const polluted = (s.sessions || []).filter((x) => x.date >= firstFakeDate && x.levelsBefore);
+  if (polluted.length) {
+    ns.levels = { ...s.levels };
+    for (const line of ["decode", "register", "build"]) {
+      ns.levels[line] = Math.max(s.levels[line] || 1, ...polluted.map((x) => x.levelsBefore[line] || 1));
+    }
+  }
+  return ns;
+}
+
 /* ---------------- AI helpers ---------------- */
 // 模型配置：出题用 reasoner（深度思考，质量最高——预取已把它的慢完全隐藏）；
 // 判分/翻译用 chat（你提交后在干等，要快）。判分若仍不老实，可把 AI_MODEL_GRADE 也改 "deepseek-reasoner"
@@ -708,6 +739,9 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
   const [left, setLeft] = useState(q.timeLimit);
   const [attempt, setAttempt] = useState(1);
   const [recording, setRecording] = useState(false);
+  // 静音模式：所在场合不方便说话时收起口语区。按设备记住（办公室静音/家里开麦），不进云同步
+  const [muted, setMuted] = useState(() => { try { return localStorage.getItem("wec_mute") === "1"; } catch (e) { return false; } });
+  function setMute(v) { setMuted(v); try { v ? localStorage.setItem("wec_mute", "1") : localStorage.removeItem("wec_mute"); } catch (e) {} }
   const spokenRef = useRef(false); // 本题答案是否为口语（决定判分标准）
   const recRef = useRef(null);
   const submittedRef = useRef(false);
@@ -796,7 +830,9 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
   }
 
   function finish(gOverride) {
-    const g = gOverride || grade; // 静默模式（考试）直接传入判分结果，绕过 state 时序
+    // 静默模式（考试）直接传入判分结果，绕过 state 时序。
+    // 只认长得像判分结果的对象——若把 finish 直接挂到 onClick，点击事件会被误当判分结果，导致所有题都记错（07-10 修复的等级卡死根因）
+    const g = gOverride && (gOverride.correct !== undefined || gOverride.pass !== undefined) ? gOverride : grade;
     let correct, tags = [];
     if (isMCQ || isBatch) { correct = g.correct; if (isBatch && !correct) tags = ["register"]; }
     else { correct = !!g.pass && attempt === 1; tags = (g.issues || []).map((i) => i.tag); }
@@ -819,7 +855,7 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
           ? (q.items || []).map((it) => q.options[it.answerIndex]).join(" / ")
           : isMCQ ? q.options[q.answerIndex] : (g.reference || ""),
         issues: isBatch
-          ? (q.items || []).filter((it, i) => picks[i] !== it.answerIndex).map((it) => ({ tag: "register", hint: it.why || it.sentence }))
+          ? (q.items || []).filter((it, i) => picks[i] !== Number(it.answerIndex)).map((it) => ({ tag: "register", hint: it.why || it.sentence }))
           : isMCQ
           ? (q.why ? [{ tag: "structure-misread", hint: q.why }] : [])
           : (g.issues || []),
@@ -975,7 +1011,7 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
       )}
       {phase === "answer" && !isMCQ && (
         <div>
-          {canSpeak && (
+          {canSpeak && !muted && (
             <div style={{ marginBottom: 10, padding: 12, background: recording ? "#FBE9E9" : C.accentSoft, borderRadius: 10, textAlign: "center" }}>
               <p style={{ margin: "0 0 8px", fontSize: 12.5, color: C.sub }}>
                 {recording ? "🔴 正在听…说完点停止（会议里就是要开口，不是打字）" : "会议表达要练"}<b style={{ color: C.ink }}>{recording ? "" : "开口说"}</b>{recording ? "" : "——点下面按住这句话说出来"}
@@ -983,10 +1019,22 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
               {!recording
                 ? <Btn onClick={startSpeaking}>🎤 开口说</Btn>
                 : <Btn kind="danger" onClick={stopSpeaking}>⏹ 说完了</Btn>}
+              <p style={{ margin: "8px 0 0" }}>
+                <button onClick={() => setMute(true)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11.5, color: C.sub, textDecoration: "underline" }}>
+                  此处不方便说话 → 切到纯打字（本设备记住）
+                </button>
+              </p>
             </div>
           )}
-          <textarea value={input} onChange={(e) => { setInput(e.target.value); spokenRef.current = false; }} rows={3} autoFocus={!canSpeak}
-            placeholder={canSpeak ? "开口说，或在这里打字…" : "Type here — the clock is running…"}
+          {canSpeak && muted && (
+            <p style={{ margin: "0 0 8px", textAlign: "right" }}>
+              <button onClick={() => setMute(false)} style={{ background: "none", border: "none", cursor: "pointer", fontSize: 11.5, color: C.sub, textDecoration: "underline" }}>
+                🎤 现在方便说了，恢复口语模式
+              </button>
+            </p>
+          )}
+          <textarea value={input} onChange={(e) => { setInput(e.target.value); spokenRef.current = false; }} rows={3} autoFocus={!canSpeak || muted}
+            placeholder={canSpeak && !muted ? "开口说，或在这里打字…" : "Type here — the clock is running…"}
             style={{ width: "100%", boxSizing: "border-box", borderRadius: 10, border: `2px solid ${recording ? C.bad : C.line}`, padding: 12, fontSize: 15, ...body, resize: "vertical", outline: "none" }} />
           {canSpeak && input && spokenRef.current && <p style={{ ...mono, fontSize: 11, color: C.sub, margin: "6px 0 0" }}>↑ 识别到的内容，可手动改后再提交</p>}
           <div style={{ marginTop: 10 }}><Btn onClick={() => handleSubmit()} disabled={!input.trim()}>Submit</Btn></div>
@@ -1000,7 +1048,7 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
         <div>
           <div style={{ display: "grid", gap: 10 }}>
             {(q.items || []).map((it, i) => {
-              const right = picks[i] === it.answerIndex;
+              const right = picks[i] === Number(it.answerIndex);
               return (
                 <div key={i} style={{ borderRadius: 10, padding: 12, background: right ? C.goodSoft : C.badSoft, border: `2px solid ${right ? C.good : C.bad}` }}>
                   <p style={{ margin: "0 0 4px", fontSize: 14.5, lineHeight: 1.55, color: C.ink }}>{i + 1}. {it.sentence}</p>
@@ -1015,7 +1063,7 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
           <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8 }}>
             <Tag tone={grade.correct ? "good" : "bad"}>{grade.correct ? "3/3 CORRECT" : `${(grade.per || []).filter(Boolean).length}/3 · 需全对`}</Tag>
           </div>
-          <div style={{ marginTop: 12 }}><Btn onClick={finish}>Next →</Btn></div>
+          <div style={{ marginTop: 12 }}><Btn onClick={() => finish()}>Next →</Btn></div>
         </div>
       )}
       {phase === "mcqdone" && !isBatch && (
@@ -1034,7 +1082,7 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
             {q.kind === "trunk" && <AnnotatedSentence sentence={q.sentence} core={q.core} />}
             <FeedbackText text={q.why || ""} />
           </div>
-          <div style={{ marginTop: 12 }}><Btn onClick={finish}>Next →</Btn></div>
+          <div style={{ marginTop: 12 }}><Btn onClick={() => finish()}>Next →</Btn></div>
         </div>
       )}
 
@@ -1098,7 +1146,7 @@ function QuestionCard({ q, onDone, qNum, qTotal, silent }) {
           <div style={{ padding: 12, background: C.bg, borderRadius: 10 }}>
             <FeedbackText text={grade.explanation || ""} />
           </div>
-          <div style={{ marginTop: 12 }}><Btn onClick={finish}>Next →</Btn></div>
+          <div style={{ marginTop: 12 }}><Btn onClick={() => finish()}>Next →</Btn></div>
         </div>
       )}
     </div>
@@ -1957,6 +2005,8 @@ export default function App() {
           if (cloud && !cloudEmpty && (cloud.updatedAt || 0) > (s.updatedAt || 0)) { cur = { ...DEFAULT_STATE, ...cloud }; saveState(cur); }
         } catch (e) { /* 云端不可达时静默用本地 */ }
       }
+      const repaired = repairEventBugData(cur);
+      if (repaired !== cur) { cur = { ...repaired, updatedAt: Date.now() }; saveState(cur); }
       setState(cur); if (!cur.placementDone) setView("placement");
     });
   }, []);
